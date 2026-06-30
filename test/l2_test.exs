@@ -12,7 +12,12 @@ defmodule L2RecordingTransport do
   def open_stream(_conn, _dir, _opts \\ []), do: {:error, :not_used_in_test}
 
   @impl true
-  def control({:s, obs, _} = s, pid), do: notify(obs, {:control, s, pid})
+  def control({:s, obs, _} = s, pid) do
+    # control が handoff の責務を負う契約: 先着分(ここでは無し)を handoff_done で渡す。
+    # テストは control 後に live を pid へ直接注入する。
+    Kernel.send(pid, {:handoff_done, s, []})
+    notify(obs, {:control, s, pid})
+  end
 
   @impl true
   def set_active({:s, obs, _} = s, active), do: notify(obs, {:set_active, s, active})

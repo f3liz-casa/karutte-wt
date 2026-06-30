@@ -20,7 +20,15 @@ defmodule Karutte.QuicTransport do
   @doc "サーバ起点でストリームを開く"
   @callback open_stream(conn, dir, keyword()) :: {:ok, stream} | error
 
-  @doc "このストリームの以後のイベントを pid へ手渡す（handoff の実体）"
+  @doc """
+  このストリームの所有を pid へ手渡す（handoff の実体）。
+
+  順序の約束: 先着分（まだ古いオーナーに溜まっているバイト）を `{:handoff_done, stream,
+  buffered}` で pid へ渡し、以後の live を `{:quic, :data, …}` 契約で pid へ流す。
+  先着分の在り処は床ごとに違う（quicer は NIF バッファ、H3 は Connection の per-stream
+  バッファ）ので、その差を吸うのが control の役。新オーナーは handoff_done を受けるまで
+  live に触れない（`Karutte.WebTransport.Handoff.wait/2`）。
+  """
   @callback control(stream, pid) :: :ok | error
 
   @doc """

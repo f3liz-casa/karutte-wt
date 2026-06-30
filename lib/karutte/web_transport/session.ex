@@ -23,7 +23,7 @@ defmodule Karutte.WebTransport.Session do
 
   use GenServer
 
-  alias Karutte.{Inline, WebTransport.Handoff, WebTransport.StreamServer}
+  alias Karutte.{Inline, WebTransport.StreamServer}
 
   @typep st :: %{
            transport: module(),
@@ -129,8 +129,9 @@ defmodule Karutte.WebTransport.Session do
         init_arg: arg
       )
 
-    # 競合窓を閉じる: 先着分を吸って新オーナーへ → 床の宛先を pid へ切替。
-    :ok = Handoff.complete(stream, pid)
+    # 競合窓を閉じる handoff は床（control/2）の責務。床ごとに先着分の在り処が違う
+    # （quicer は NIF バッファ、H3 は Connection の per-stream バッファ）ので、
+    # 「先着分→handoff_done→live を pid へ順に渡す」を control が引き受ける。
     :ok = s.transport.control(stream, pid)
     put_in(s.owners[stream], pid)
   end
