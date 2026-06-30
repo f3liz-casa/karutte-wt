@@ -25,8 +25,8 @@ defmodule Karutte.QuicTransport.Http3 do
   @type stream :: {:h3s, pid(), term()}
 
   @impl true
-  def open_stream({:h3c, conn_pid, _qconn, _sid}, dir, _opts \\ []) do
-    GenServer.call(conn_pid, {:open_stream, dir})
+  def open_stream({:h3c, conn_pid, _qconn, sid}, dir, _opts \\ []) do
+    GenServer.call(conn_pid, {:open_stream, dir, sid})
   end
 
   @impl true
@@ -54,14 +54,14 @@ defmodule Karutte.QuicTransport.Http3 do
   end
 
   @impl true
-  def send_datagram({:h3c, conn_pid, _qconn, _sid}, data) do
-    Kernel.send(conn_pid, {:datagram, data})
+  def send_datagram({:h3c, conn_pid, _qconn, sid}, data) do
+    Kernel.send(conn_pid, {:datagram, sid, data})
     :ok
   end
 
   @impl true
-  def close({:h3c, conn_pid, _qconn, _sid}, code) do
-    Kernel.send(conn_pid, {:close, code})
+  def close({:h3c, conn_pid, _qconn, sid}, code) do
+    Kernel.send(conn_pid, {:close_session, sid, code})
     :ok
   end
 end

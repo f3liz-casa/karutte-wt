@@ -89,11 +89,12 @@ QUIC のフロー制御は三つあって、それぞれ別の場所に、同じ
 
 ## 確かめてあること
 
-`mix test` が緑（39 passed）。**実 QUIC で end-to-end が通っている**:
+`mix test` が緑（41 passed）。**実 QUIC で end-to-end が通っている**:
 
-- `test/http3_loopback_test.exs` — 最小 Elixir クライアント↔ `Karutte.Http3.Echo` サーバを
-  実 quicer で繋ぎ、connect → H3 SETTINGS → Extended CONNECT(webtransport) → 200 →
-  WT 双方向ストリーム echo → datagram echo をループバックで通す。
+- `test/http3_loopback_test.exs` — 最小 Elixir クライアント↔ H3 WebTransport サーバを実 quicer で繋ぐ:
+  - connect → H3 SETTINGS → Extended CONNECT(webtransport) → 200 → WT 双方向ストリーム echo → datagram echo
+  - 一つの H3 接続に**独立した二つの WT セッション**（session_id で振り分け）
+  - **CLOSE_WEBTRANSPORT_SESSION capsule** でそのセッションだけ畳まれ、runner の terminate が走る
 
 そして **本物のブラウザ（Chrome 149）でも確認済み**: 自己署名証明書を `serverCertificateHashes`
 でピン留めして `new WebTransport("https://localhost:4433/")`、双方向ストリーム echo（"hi"→"hi"）と
@@ -116,9 +117,9 @@ behaviour 群はコンパイルが通り、跨りの型（`QuicTransport.stream(
 
 ## まだやっていないこと（正直に）
 
-- **軽い実装の割り切り。** 1 接続につき WT セッションは一つ前提（複数セッションは未対応）。
-  CONNECT 以外のリクエストは 404。セッションストリームの capsule（DRAIN / CLOSE 等）は今は無視。
-  エラー処理・GOAWAY・寿命まわりは最小限。"prod で軽く" の段（重い本番化はこの先）。
+- **軽い実装の割り切り。** 一接続で複数 WT セッション・CLOSE capsule は対応した。一方で
+  DRAIN capsule は記録のみ（新規ストリーム抑制は未）、CONNECT 以外のリクエストは 404、
+  GOAWAY・寿命まわりは最小限。"prod で軽く" の段（重い本番化はこの先）。
 - **L2 の Plug 縫い目（`Karutte.WebTransportAdapter`）は別経路。** これは Bandit に WebTransport を
   載せる将来用の形で、いまの HTTP/3 サーバ（`Karutte.Http3.*`）は Bandit を介さず quicer に直に立つ。
 - **HTTP/2 の床はブラウザ非対応のフォールバック。** datagram は擬似（信頼・順序つき）になる。

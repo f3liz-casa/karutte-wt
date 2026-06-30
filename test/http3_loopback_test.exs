@@ -1,24 +1,44 @@
+# 終了通知つき Echo（capsule close の検証用）。session が閉じると terminate が test pid へ報せる。
+defmodule Karutte.Http3.NotifyEcho do
+  @behaviour Karutte.WebTransport
+
+  @impl true
+  def init(test_pid, conn_info),
+    do: {:ok, %{test: test_pid, transport: conn_info.transport, conn: conn_info.conn}}
+
+  @impl true
+  def handle_stream(_stream, _dir, s), do: {{:handler, Karutte.Http3.Echo.Stream, nil}, s}
+
+  @impl true
+  def handle_datagram(bin, s) do
+    s.transport.send_datagram(s.conn, bin)
+    {:ok, s}
+  end
+
+  @impl true
+  def terminate(reason, s) do
+    Kernel.send(s.test, {:session_terminated, reason})
+    :ok
+  end
+end
+
 defmodule Karutte.Http3.LoopbackTest do
   use ExUnit.Case
 
-  # 実 QUIC の上で、最小 Elixir クライアントが Echo サーバと喋れることを確かめる。
-  # connect → H3 SETTINGS → Extended CONNECT(webtransport) → 200 → WT bidi echo → datagram echo。
-  #
-  # クライアントは cow_http3 / cow_qpack を直叩き（サーバ側のように machine 全部は回さない）。
-  # quicer NIF が要るので test 環境で動く（ビルド済み）。
+  # 実 QUIC の上で、最小 Elixir クライアントが H3 WebTransport サーバと喋れることを確かめる。
+  # クライアントは cow_http3 / cow_qpack / cow_capsule を直叩き。quicer NIF が要る（ビルド済み）。
 
   @moduletag :quic
-
-  @port 14_433
   @recv_timeout 5_000
 
   setup_all do
     tmp = Path.join(System.tmp_dir!(), "karutte_h3_#{System.unique_integer([:positive])}")
     {:ok, cert} = Karutte.Http3.Cert.generate(tmp)
+    port = 14_433
 
     {:ok, srv} =
       Karutte.Http3.Server.start_link(
-        port: @port,
+        port: port,
         certfile: cert.certfile,
         keyfile: cert.keyfile,
         handler: Karutte.Http3.Echo,
@@ -30,14 +50,72 @@ defmodule Karutte.Http3.LoopbackTest do
       File.rm_rf(tmp)
     end)
 
-    :ok
+    %{port: port}
   end
 
-  test "WebTransport over HTTP/3: CONNECT 200, bidi echo, datagram echo" do
+  test "WebTransport over HTTP/3: CONNECT 200, bidi echo, datagram echo", %{port: port} do
+    conn = connect(port)
+    {session_id, _req} = open_session(conn)
+
+    assert "hi" == wt_bidi_echo(conn, session_id, "hi")
+
+    :quicer.send_dgram(conn, :erlang.iolist_to_binary(:cow_http3.datagram(session_id, "ping")))
+    assert "ping" == recv_datagram(conn, session_id)
+
+    :quicer.shutdown_connection(conn)
+  end
+
+  test "一つの H3 接続に独立した二つの WT セッション", %{port: port} do
+    conn = connect(port)
+    {sid_a, _} = open_session(conn)
+    {sid_b, _} = open_session(conn)
+
+    assert sid_a != sid_b
+    assert "aa" == wt_bidi_echo(conn, sid_a, "aa")
+    assert "bb" == wt_bidi_echo(conn, sid_b, "bb")
+
+    :quicer.shutdown_connection(conn)
+  end
+
+  test "CLOSE capsule でそのセッションだけ畳まれ、runner の terminate が走る" do
+    tmp = Path.join(System.tmp_dir!(), "karutte_h3c_#{System.unique_integer([:positive])}")
+    {:ok, cert} = Karutte.Http3.Cert.generate(tmp)
+    port = 14_434
+
+    {:ok, srv} =
+      Karutte.Http3.Server.start_link(
+        port: port,
+        certfile: cert.certfile,
+        keyfile: cert.keyfile,
+        handler: Karutte.Http3.NotifyEcho,
+        handler_arg: self(),
+        acceptors: 1
+      )
+
+    on_exit(fn ->
+      if Process.alive?(srv), do: Process.exit(srv, :normal)
+      File.rm_rf(tmp)
+    end)
+
+    conn = connect(port)
+    {session_id, req} = open_session(conn)
+    assert "hi" == wt_bidi_echo(conn, session_id, "hi")
+
+    # セッションストリーム上に CLOSE_WEBTRANSPORT_SESSION capsule + FIN。
+    :quicer.send(req, :erlang.iolist_to_binary(:cow_capsule.wt_close_session(0, <<>>)), 0x4)
+
+    assert_receive {:session_terminated, _reason}, @recv_timeout
+    :quicer.shutdown_connection(conn)
+  end
+
+  # ================= クライアント・ヘルパ =================
+
+  # 接続して H3 を立ち上げる（control/encoder/decoder + SETTINGS）。conn を返す。
+  defp connect(port) do
     {:ok, conn} =
       :quicer.connect(
         ~c"localhost",
-        @port,
+        port,
         [
           {:alpn, [~c"h3"]},
           {:verify, :none},
@@ -49,7 +127,6 @@ defmodule Karutte.Http3.LoopbackTest do
         @recv_timeout
       )
 
-    # --- クライアント H3: ローカル control/encoder/decoder + SETTINGS ---
     {:ok, ctrl} = :quicer.start_stream(conn, %{open_flag: 1, active: true})
     {:ok, enc} = :quicer.start_stream(conn, %{open_flag: 1, active: true})
     {:ok, dec} = :quicer.start_stream(conn, %{open_flag: 1, active: true})
@@ -57,11 +134,11 @@ defmodule Karutte.Http3.LoopbackTest do
     :quicer.send(ctrl, [<<0>>, settings])
     :quicer.send(enc, <<2>>)
     :quicer.send(dec, <<3>>)
+    conn
+  end
 
-    qpack_enc = :cow_qpack.init(:encoder, 0, 0)
-    qpack_dec = :cow_qpack.init(:decoder, 0, 0)
-
-    # --- Extended CONNECT(webtransport) を request bidi stream で ---
+  # Extended CONNECT(webtransport) を一本立てて 200 を受ける。{session_id, req_stream} を返す。
+  defp open_session(conn) do
     {:ok, req} = :quicer.start_stream(conn, %{open_flag: 0, active: true})
     {:ok, session_id} = :quicer.get_stream_id(req)
 
@@ -73,67 +150,53 @@ defmodule Karutte.Http3.LoopbackTest do
       {":protocol", "webtransport"}
     ]
 
-    {:ok, block, _ins, _qpack_enc} = :cow_qpack.encode_field_section(headers, session_id, qpack_enc)
+    {:ok, block, _ins, _enc} =
+      :cow_qpack.encode_field_section(headers, session_id, :cow_qpack.init(:encoder, 0, 0))
+
     :quicer.send(req, :cow_http3.headers(block))
 
-    # --- 200 を受ける ---
-    {status, _qpack_dec} = recv_response_status(req, session_id, qpack_dec)
+    status = recv_response_status(req, session_id)
     assert status == "200" or status == 200
-
-    # --- WT bidi stream に "hi" を送って echo を受ける ---
-    {:ok, wt} = :quicer.start_stream(conn, %{open_flag: 0, active: true})
-    :quicer.send(wt, [:cow_http3.webtransport_stream_header(session_id, :bidi), "hi"])
-    assert "hi" == recv_raw(wt, "")
-
-    # --- datagram "ping" を送って echo を受ける ---
-    :quicer.send_dgram(conn, :erlang.iolist_to_binary(:cow_http3.datagram(session_id, "ping")))
-    assert "ping" == recv_datagram(conn, session_id)
-
-    :quicer.shutdown_connection(conn)
+    {session_id, req}
   end
 
-  # request stream の HEADERS フレームを拾って :status を読む。
-  defp recv_response_status(req, session_id, qpack_dec, buf \\ <<>>) do
+  # WT 双方向ストリームを開いて msg を送り、echo を受ける。
+  defp wt_bidi_echo(conn, session_id, msg) do
+    {:ok, wt} = :quicer.start_stream(conn, %{open_flag: 0, active: true})
+    :quicer.send(wt, [:cow_http3.webtransport_stream_header(session_id, :bidi), msg])
+    recv_raw(wt, byte_size(msg))
+  end
+
+  defp recv_response_status(req, session_id, buf \\ <<>>) do
     case :cow_http3.parse(buf) do
       {:ok, {:headers, block}, _rest} ->
-        {:ok, headers, _ins, qpack_dec} = :cow_qpack.decode_field_section(block, session_id, qpack_dec)
-        {status_of(headers), qpack_dec}
+        {:ok, headers, _ins, _dec} =
+          :cow_qpack.decode_field_section(block, session_id, :cow_qpack.init(:decoder, 0, 0))
+
+        Enum.find_value(headers, fn
+          {":status", v} -> v
+          _ -> false
+        end)
 
       _ ->
         receive do
-          {:quic, bin, ^req, _} when is_binary(bin) ->
-            recv_response_status(req, session_id, qpack_dec, buf <> bin)
-
-          {:quic, :new_stream, s, _} ->
-            :quicer.setopt(s, :active, true)
-            recv_response_status(req, session_id, qpack_dec, buf)
-
-          {:quic, _other, _, _} ->
-            recv_response_status(req, session_id, qpack_dec, buf)
+          {:quic, bin, ^req, _} when is_binary(bin) -> recv_response_status(req, session_id, buf <> bin)
+          {:quic, :new_stream, s, _} -> (:quicer.setopt(s, :active, true); recv_response_status(req, session_id, buf))
+          {:quic, _o, _, _} -> recv_response_status(req, session_id, buf)
         after
           @recv_timeout -> flunk("200 を受け取れなかった (buf=#{inspect(buf)})")
         end
     end
   end
 
-  defp status_of(headers) do
-    Enum.find_value(headers, fn
-      {":status", v} -> v
-      _ -> false
-    end)
-  end
-
-  # WT ストリームの生バイト（preface 無し。echo された "hi"）。
-  defp recv_raw(wt, acc) do
-    if byte_size(acc) >= 2 do
+  defp recv_raw(wt, want, acc \\ "") do
+    if byte_size(acc) >= want do
       acc
     else
       receive do
-        {:quic, bin, ^wt, _} when is_binary(bin) -> recv_raw(wt, acc <> bin)
-        {:quic, :new_stream, s, _} ->
-          :quicer.setopt(s, :active, true)
-          recv_raw(wt, acc)
-        {:quic, _other, _, _} -> recv_raw(wt, acc)
+        {:quic, bin, ^wt, _} when is_binary(bin) -> recv_raw(wt, want, acc <> bin)
+        {:quic, :new_stream, s, _} -> (:quicer.setopt(s, :active, true); recv_raw(wt, want, acc))
+        {:quic, _o, _, _} -> recv_raw(wt, want, acc)
       after
         @recv_timeout -> flunk("WT echo を受け取れなかった (acc=#{inspect(acc)})")
       end
@@ -148,12 +211,8 @@ defmodule Karutte.Http3.LoopbackTest do
           _ -> recv_datagram(conn, session_id)
         end
 
-      {:quic, :new_stream, s, _} ->
-        :quicer.setopt(s, :active, true)
-        recv_datagram(conn, session_id)
-
-      {:quic, _other, _, _} ->
-        recv_datagram(conn, session_id)
+      {:quic, :new_stream, s, _} -> (:quicer.setopt(s, :active, true); recv_datagram(conn, session_id))
+      {:quic, _o, _, _} -> recv_datagram(conn, session_id)
     after
       @recv_timeout -> flunk("datagram echo を受け取れなかった")
     end

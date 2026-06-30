@@ -39,14 +39,16 @@ defmodule Karutte.Http3.Connection do
     :ctrl_qs,
     :enc_qs,
     :dec_qs,
-    :session_pid,
-    :session_id,
+    sessions: %{},
+    sess_qs: %{},
     ids: %{},
     kinds: %{},
     bufs: %{},
     wt_buf: %{},
     wt_owner: %{},
     wt_dir: %{},
+    wt_sess: %{},
+    skip: %{},
     pending: []
   ]
 
@@ -190,14 +192,19 @@ defmodule Karutte.Http3.Connection do
     {:noreply, s}
   end
 
-  def handle_info({:datagram, data}, s) do
-    :quicer.send_dgram(s.qconn, :erlang.iolist_to_binary(:cow_http3.datagram(s.session_id, data)))
+  def handle_info({:datagram, sid, data}, s) do
+    :quicer.send_dgram(s.qconn, :erlang.iolist_to_binary(:cow_http3.datagram(sid, data)))
     {:noreply, s}
   end
 
-  def handle_info({:close, _code}, s) do
-    :quicer.shutdown_connection(s.qconn)
-    {:stop, :normal, s}
+  # 床の close/2 ＝ その WT セッションだけ閉じる（QUIC 接続は他セッションのため生かす）。
+  def handle_info({:close_session, sid, code}, s) do
+    case Map.get(s.sess_qs, sid) do
+      nil -> :ok
+      qs -> :quicer.send(qs, :erlang.iolist_to_binary(:cow_capsule.wt_close_session(code, <<>>)))
+    end
+
+    {:noreply, close_session(s, sid)}
   end
 
   def handle_info(other, s) do
@@ -206,12 +213,19 @@ defmodule Karutte.Http3.Connection do
   end
 
   @impl true
-  def handle_call({:open_stream, dir}, _from, s) do
+  def handle_call({:open_stream, dir, sid}, _from, s) do
     flag = if dir == :uni, do: @open_uni, else: 0
     {:ok, qs} = :quicer.start_stream(s.qconn, %{open_flag: flag, active: true})
-    :quicer.send(qs, :cow_http3.webtransport_stream_header(s.session_id, dir))
-    {:ok, machine} = :cow_http3_machine.become_webtransport_stream(sid(qs), s.session_id, s.machine)
-    s = %{s | machine: machine} |> put_id(qs, sid(qs)) |> put_kind(qs, :wt) |> put_dir(qs, dir)
+    :quicer.send(qs, :cow_http3.webtransport_stream_header(sid, dir))
+    {:ok, machine} = :cow_http3_machine.become_webtransport_stream(sid(qs), sid, s.machine)
+
+    s =
+      %{s | machine: machine}
+      |> put_id(qs, sid(qs))
+      |> put_kind(qs, :wt)
+      |> put_dir(qs, dir)
+      |> put_wt_sess(qs, sid)
+
     {:reply, {:ok, h3s(s, qs)}, s}
   end
 
@@ -223,6 +237,7 @@ defmodule Karutte.Http3.Connection do
       :pending -> classify(s, qs, bin, fin)
       :control -> feed_control(s, qs, bin, fin)
       :request -> feed_request(s, qs, bin, fin)
+      :session -> feed_session(s, qs, bin, fin)
       kind when kind in [:encoder, :decoder] -> feed_qpack(s, qs, bin, fin)
       _ -> s
     end
@@ -391,7 +406,8 @@ defmodule Karutte.Http3.Connection do
         conn_info: %{transport: @transport, conn: conn}
       )
 
-    %{s | machine: machine, session_pid: pid, session_id: id} |> put_kind(qs, :session)
+    %{s | machine: machine, sessions: Map.put(s.sessions, id, pid), sess_qs: Map.put(s.sess_qs, id, qs)}
+    |> put_kind(qs, :session)
   end
 
   defp respond(s, qs, status, fin?) do
@@ -432,10 +448,21 @@ defmodule Karutte.Http3.Connection do
 
   defp start_wt_stream(s, qs, session_id, dir) do
     {:ok, machine} = :cow_http3_machine.become_webtransport_stream(sid(qs), session_id, s.machine)
-    s = %{s | machine: machine} |> put_kind(qs, :wt) |> put_dir(qs, dir) |> clear_buf(qs)
-    # runner（Session）へ new_stream を通知。所有が決まるまで以後のバイトはバッファ。
-    if s.session_pid do
-      Kernel.send(s.session_pid, {:quic, :new_stream, {:h3c, self(), s.qconn, s.session_id}, h3s(s, qs), dir})
+
+    s =
+      %{s | machine: machine}
+      |> put_kind(qs, :wt)
+      |> put_dir(qs, dir)
+      |> put_wt_sess(qs, session_id)
+      |> clear_buf(qs)
+
+    # 属する WT セッションの runner へ new_stream を通知。所有が決まるまでバイトはバッファ。
+    case Map.get(s.sessions, session_id) do
+      nil ->
+        :ok
+
+      pid ->
+        Kernel.send(pid, {:quic, :new_stream, {:h3c, self(), s.qconn, session_id}, h3s(s, qs), dir})
     end
 
     Map.update!(s, :wt_buf, &Map.put_new(&1, qs, []))
@@ -468,13 +495,87 @@ defmodule Karutte.Http3.Connection do
     %{s | wt_owner: Map.put(s.wt_owner, qs, pid), wt_buf: Map.delete(s.wt_buf, qs)}
   end
 
+  # ================= セッションストリームの capsule =================
+
+  # CONNECT が通った後、セッションストリームは Capsule Protocol を運ぶ（RFC 9297）。
+  # CLOSE / DRAIN を拾う。session_id はこのストリーム id そのもの。
+  defp feed_session(s, qs, bin, fin) do
+    sid = sid(qs)
+    {bin, s} = apply_skip(s, qs, bin)
+    buf = Map.get(s.bufs, qs, <<>>) <> bin
+    s = parse_capsules(s, qs, sid, buf)
+    if fin, do: close_session(s, sid), else: s
+  end
+
+  defp parse_capsules(s, qs, sid, buf) do
+    case :cow_capsule.parse(buf) do
+      {:ok, {:wt_close_session, _code, _msg}, _rest} ->
+        close_session(clear_buf(s, qs), sid)
+
+      {:ok, :wt_drain_session, rest} ->
+        # ドレイン要求。今は記録だけ（新規ストリームを止める本格対応は後）。
+        Logger.debug("WT drain session #{sid}")
+        parse_capsules(s, qs, sid, rest)
+
+      {:ok, rest} ->
+        # 知らない capsule は飛ばして続ける。
+        parse_capsules(s, qs, sid, rest)
+
+      {:skip, n} ->
+        %{s | skip: Map.put(s.skip, qs, n)} |> clear_buf(qs)
+
+      :more ->
+        set_buf(s, qs, buf)
+
+      :error ->
+        Logger.debug("capsule parse error on session #{sid}")
+        clear_buf(s, qs)
+    end
+  end
+
+  # 前の capsule で「あと n バイト読み飛ばす」と決めていた分を消費。
+  defp apply_skip(s, qs, bin) do
+    case Map.get(s.skip, qs, 0) do
+      0 ->
+        {bin, s}
+
+      n when n >= byte_size(bin) ->
+        {<<>>, %{s | skip: Map.put(s.skip, qs, n - byte_size(bin))}}
+
+      n ->
+        <<_::binary-size(^n), rest::binary>> = bin
+        {rest, %{s | skip: Map.delete(s.skip, qs)}}
+    end
+  end
+
+  # WT セッションを掃除する。runner を止め（紐づく StreamServer も連れて落ちる）、
+  # machine から wt_session と配下の wt_stream を消す。QUIC 接続は触らない。
+  defp close_session(s, session_id) do
+    case Map.get(s.sessions, session_id) do
+      nil ->
+        s
+
+      pid ->
+        if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+        machine = :cow_http3_machine.close_webtransport_session(session_id, s.machine)
+
+        %{
+          s
+          | machine: machine,
+            sessions: Map.delete(s.sessions, session_id),
+            sess_qs: Map.delete(s.sess_qs, session_id)
+        }
+    end
+  end
+
   # ================= datagram =================
 
   defp on_datagram(bin, s) do
     {session_id, payload} = :cow_http3.parse_datagram(bin)
 
-    if s.session_pid && session_id == s.session_id do
-      Kernel.send(s.session_pid, {:quic, :datagram, {:h3c, self(), s.qconn, s.session_id}, payload})
+    case Map.get(s.sessions, session_id) do
+      nil -> :ok
+      pid -> Kernel.send(pid, {:quic, :datagram, {:h3c, self(), s.qconn, session_id}, payload})
     end
 
     s
@@ -509,6 +610,7 @@ defmodule Karutte.Http3.Connection do
   defp put_id(s, qs, id), do: %{s | ids: Map.put(s.ids, qs, id)}
   defp put_kind(s, qs, kind), do: %{s | kinds: Map.put(s.kinds, qs, kind)}
   defp put_dir(s, qs, dir), do: %{s | wt_dir: Map.put(s.wt_dir, qs, dir)}
+  defp put_wt_sess(s, qs, sid), do: %{s | wt_sess: Map.put(s.wt_sess, qs, sid)}
   defp set_buf(s, qs, buf), do: %{s | bufs: Map.put(s.bufs, qs, buf)}
   defp clear_buf(s, qs), do: %{s | bufs: Map.delete(s.bufs, qs)}
 
@@ -520,16 +622,16 @@ defmodule Karutte.Http3.Connection do
         bufs: Map.delete(s.bufs, qs),
         wt_buf: Map.delete(s.wt_buf, qs),
         wt_owner: Map.delete(s.wt_owner, qs),
-        wt_dir: Map.delete(s.wt_dir, qs)
+        wt_dir: Map.delete(s.wt_dir, qs),
+        wt_sess: Map.delete(s.wt_sess, qs),
+        skip: Map.delete(s.skip, qs)
     }
   end
 
+  # WT ストリームの宛先: 所有者がいればそこへ、いなければ属するセッションの runner へ。
   defp forward(s, qs, msg) do
-    case Map.get(s.wt_owner, qs) do
-      nil -> if s.session_pid, do: Kernel.send(s.session_pid, msg)
-      pid -> Kernel.send(pid, msg)
-    end
-
+    pid = Map.get(s.wt_owner, qs) || Map.get(s.sessions, Map.get(s.wt_sess, qs))
+    if pid, do: Kernel.send(pid, msg)
     s
   end
 end
