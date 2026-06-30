@@ -1,0 +1,8 @@
+%{
+  "mime": {:hex, :mime, "2.0.7", "b8d739037be7cd402aee1ba0306edfdef982687ee7e9859bee6198c1e7e2f128", [:mix], [], "hexpm", "6171188e399ee16023ffc5b76ce445eb6d9672e2e241d2df6050f3c771e80ccd"},
+  "plug": {:hex, :plug, "1.20.1", "82cdee1d7535d4f4db5c5602a7fd49512d64690be54fd62374856ee70e62eb29", [:mix], [{:mime, "~> 1.0 or ~> 2.0", [hex: :mime, repo: "hexpm", optional: false]}, {:plug_crypto, "~> 1.1.1 or ~> 1.2 or ~> 2.0", [hex: :plug_crypto, repo: "hexpm", optional: false]}, {:telemetry, "~> 0.4.3 or ~> 1.0", [hex: :telemetry, repo: "hexpm", optional: false]}], "hexpm", "892d2a1a7a3f5368c5a3b9067bba1050c031495f48c430ec00b09691dbf211b7"},
+  "plug_crypto": {:hex, :plug_crypto, "2.1.1", "19bda8184399cb24afa10be734f84a16ea0a2bc65054e23a62bb10f06bc89491", [:mix], [], "hexpm", "6470bce6ffe41c8bd497612ffde1a7e4af67f36a15eea5f921af71cf3e11247c"},
+  "quicer": {:hex, :quicer, "0.4.3", "407f19063a58023f75884f7a999813a96ca01a322148450e608dd9b6c63d5a42", [:rebar3], [{:snabbkaffe, "1.0.10", [hex: :snabbkaffe, repo: "hexpm", optional: false]}], "hexpm", "db5c34662b3e158ae176a08a655678f524d2a6f55bf183e2f08a2ed5d9333939"},
+  "snabbkaffe": {:hex, :snabbkaffe, "1.0.10", "9be2f54f61fc6862391b666b2b5b76c3fa53598e2989a17cef1b48cf347a8a63", [:rebar3], [], "hexpm", "70a98df36ae756908d55b5770891d443d63c903833e3e87d544036e13d4fac26"},
+  "telemetry": {:hex, :telemetry, "1.4.2", "a0cb522801dffb1c49fe6e30561badffc7b6d0e180db1300df759faa22062855", [:rebar3], [], "hexpm", "928f6495066506077862c0d1646609eed891a4326bee3126ba54b60af61febb1"},
+}

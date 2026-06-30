@@ -34,16 +34,31 @@ Session  ×  (Stream)*  ×  Datagram-port
 
 三つは失敗も順序も独立。だから設計もこの積を、そのままプロセスの積に写す。
 
-| 層 | モジュール | 役 |
-|----|-----------|----|
-| L4 Stream | `Karutte.WebTransport.Stream` | データ面。1 ストリーム = 1 プロセス。WebSock + demand + half-close |
-| L3 Session | `Karutte.WebTransport` | 制御面**だけ**。accept / handoff / datagram / 寿命。バイトには触れない |
-| L1 QUIC | `Karutte.QuicTransport` | 差し替え口。quicer / Rust NIF / 将来の純 Elixir を裏に隠す |
+behaviour（spec）と、それを回す実体（runner）を分けてある。
+
+| 層 | spec（behaviour） | runner（実体） | 役 |
+|----|------|------|----|
+| L4 Stream | `Karutte.WebTransport.Stream` | `…Stream.StreamServer`※ | データ面。1 ストリーム = 1 プロセス。WebSock + demand + half-close |
+| L3 Session | `Karutte.WebTransport` | `Karutte.WebTransport.Session` | 制御面**だけ**。accept / handoff / datagram / 寿命。バイトには触れない |
+| L2 縫い目 | — | `Karutte.WebTransportAdapter` | Plug `upgrade_adapter(:webtransport, …)` の脱出口（WebSock と対称） |
+| L1 QUIC | `Karutte.QuicTransport` | `…Quicer` / `…Http2` | 差し替え口（behaviour）。床を裏に隠す |
+
+※ runner は `Karutte.WebTransport.StreamServer`。
+
+L1 の床（差し替え口の二つの実装）:
+
+- `Karutte.QuicTransport.Quicer` — 本物の床。emqx の quicer（msquic NIF）へ委譲。
+- `Karutte.QuicTransport.Http2` — TCP の床。WebTransport over HTTP/2（draft-ietf-webtrans-http2）。
+  QUIC を待たずに今日動く版。**同じ behaviour を満たす**ので上層は床を知らない。
+
+runner（L2/L3/L4）は `normalize/1` 済みの `{:quic, …}` 契約だけを見る ＝ **床に依らない**。
+だから Session / StreamServer は QUIC でも HTTP/2 でも同じコードで回る。
 
 補助:
 
 - `Karutte.WebTransport.Handoff` — 所有権を手渡すときの順序の約束（競合窓を閉じる）
 - `Karutte.Inline` — 短命ストリームを一塊で渡すための組み立て機械（メモリの蓋）
+- `Karutte.Varint` / `Karutte.Capsule` — ワイヤの土台（RFC 9000 §16 / RFC 9297）。HTTP/2 の床が使う。
 
 ## 背圧は三軸で、重ならない
 
@@ -63,23 +78,36 @@ QUIC のフロー制御は三つあって、それぞれ別の場所に、同じ
 
 ## 確かめてあること
 
-`mix test` が緑（7 passed）。
+`mix test` が緑（32 passed）。
 
 - `test/inline_test.exs` — 組み立て・境界・早期 overflow が漏れなく閉じている
 - `test/handoff_test.exs` — handoff の約束で順序と損失が守られること、
   約束を破ると先着データが取り残されること（＝この約束が要る理由）
+- `test/varint_test.exs` / `test/capsule_test.exs` — ワイヤの土台が往復し、足りなければ `:more`
+- `test/quicer_normalize_test.exs` — L1 の「メッセージの面」（quicer ネイティブ → 契約）
+- `test/http2_test.exs` — HTTP/2 の床: 前置き・stream・datagram カプセルが往復、demand が H2 の窓へ
+- `test/transport_parity_test.exs` — 二つの床が同じ behaviour を満たし、同じ `{:quic, …}` 契約を作る
+- `test/l2_test.exs` — runner が床に依らず L3/L4 を回す（偽の床で end-to-end）:
+  new_stream → handoff → echo、demand が床へ、FIN で半閉じ、inline の組み立てと overflow reset、
+  reset 処分、datagram の制御面分配
 
 behaviour 群はコンパイルが通り、跨りの型（`QuicTransport.stream()` 等）も解決する。
 
 ## まだやっていないこと（正直に）
 
-- **L1 が quicer に未接続。** `Karutte.QuicTransport` の具体実装（`controlling_process/2` /
-  `handoff_stream/2` / passive `recv` + `PENDING`）がまだ。ここは Rust NIF のビルドが要る、
-  玩具と本物の境目。
-- **L2（HTTP/3 Extended CONNECT + Capsule, RFC 9297）と Plug 接続**（`upgrade_adapter`）が
-  まだコメントの中。
-- **HTTP/2 バインディング**（draft-ietf-webtrans-http2, TCP）を「同じ上層の二実装目」として
-  載せる話は構想だけ。これができれば QUIC を待たずに今日動かせる版になる。
+- **L1 Quicer の命令の面が未走行。** `Karutte.QuicTransport.Quicer` の `open_stream` /
+  `control` / `send` … は quicer へ委譲する形で書いてあるが、実 NIF に当てて走らせてはいない
+  （quicer は optional dep のまま、依存ゼロで緑を保っている）。Rust NIF のビルドが要る玩具と
+  本物の境目。verified なのは `normalize/1`（メッセージの面）だけ。
+- **L2 の縫い目は形だけ（Bandit 待ち）。** `Karutte.WebTransportAdapter.upgrade/4` は
+  Plug `upgrade_adapter(:webtransport, …)` の正しい形を置くが、Bandit はまだ `:websocket`
+  しか脱出口として解釈しない（HTTP/3 未実装、HTTP/2 の Extended CONNECT → WebTransport も未対応）。
+  実際にセッションが起きるには、床か Bandit がこの宛先を拾って `Session` を起こす配線が要る。
+  runner（`Session` / `StreamServer`）は契約駆動なので、その配線が来れば床に依らず回る
+  （`l2_test.exs` が偽の床で実証済み）。HTTP/2 の床も今は sink（pid）に命令を逃がしてある。
+- **HTTP/2 の datagram は擬似（信頼・順序つき）。** RFC 9221 の不確実 best-effort という性質は
+  TCP では失われる。`Karutte.QuicTransport.Http2` の moduledoc に三軸の写りかた（survive / 痩せる）を
+  正直に書いてある。
 
 ## 走らせ方
 
