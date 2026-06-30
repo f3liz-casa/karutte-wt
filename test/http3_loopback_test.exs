@@ -36,20 +36,17 @@ defmodule Karutte.Http3.LoopbackTest do
     {:ok, cert} = Karutte.Http3.Cert.generate(tmp)
     port = 14_433
 
-    {:ok, srv} =
-      Karutte.Http3.Server.start_link(
-        port: port,
-        certfile: cert.certfile,
-        keyfile: cert.keyfile,
-        handler: Karutte.Http3.Echo,
-        acceptors: 1
-      )
+    start_supervised!(
+      {Karutte.Http3.Server,
+       port: port,
+       certfile: cert.certfile,
+       keyfile: cert.keyfile,
+       handler: Karutte.Http3.Echo,
+       acceptors: 1,
+       name: Karutte.Http3.Server.EchoT}
+    )
 
-    on_exit(fn ->
-      if Process.alive?(srv), do: Process.exit(srv, :normal)
-      File.rm_rf(tmp)
-    end)
-
+    on_exit(fn -> File.rm_rf(tmp) end)
     %{port: port}
   end
 
@@ -77,25 +74,42 @@ defmodule Karutte.Http3.LoopbackTest do
     :quicer.shutdown_connection(conn)
   end
 
+  test "一接続の事故はサーバ全体を倒さず、受け付けは続く", %{port: port} do
+    conn1 = connect(port)
+    {sid1, _} = open_session(conn1)
+    assert "x" == wt_bidi_echo(conn1, sid1, "x")
+
+    # 動いている Connection を一つ強制終了（事故を模す）。
+    children = DynamicSupervisor.which_children(Karutte.Http3.Server.EchoT.ConnectionSup)
+    assert [{_, cpid, _, _} | _] = children
+    Process.exit(cpid, :kill)
+
+    # acceptor は生きているので、新しい接続はまだ通る。
+    conn2 = connect(port)
+    {sid2, _} = open_session(conn2)
+    assert "y" == wt_bidi_echo(conn2, sid2, "y")
+
+    :quicer.shutdown_connection(conn1)
+    :quicer.shutdown_connection(conn2)
+  end
+
   test "CLOSE capsule でそのセッションだけ畳まれ、runner の terminate が走る" do
     tmp = Path.join(System.tmp_dir!(), "karutte_h3c_#{System.unique_integer([:positive])}")
     {:ok, cert} = Karutte.Http3.Cert.generate(tmp)
     port = 14_434
 
-    {:ok, srv} =
-      Karutte.Http3.Server.start_link(
-        port: port,
-        certfile: cert.certfile,
-        keyfile: cert.keyfile,
-        handler: Karutte.Http3.NotifyEcho,
-        handler_arg: self(),
-        acceptors: 1
-      )
+    start_supervised!(
+      {Karutte.Http3.Server,
+       port: port,
+       certfile: cert.certfile,
+       keyfile: cert.keyfile,
+       handler: Karutte.Http3.NotifyEcho,
+       handler_arg: self(),
+       acceptors: 1,
+       name: Karutte.Http3.Server.CloseT}
+    )
 
-    on_exit(fn ->
-      if Process.alive?(srv), do: Process.exit(srv, :normal)
-      File.rm_rf(tmp)
-    end)
+    on_exit(fn -> File.rm_rf(tmp) end)
 
     conn = connect(port)
     {session_id, req} = open_session(conn)

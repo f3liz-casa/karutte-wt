@@ -39,6 +39,7 @@ defmodule Karutte.Http3.Connection do
     :ctrl_qs,
     :enc_qs,
     :dec_qs,
+    max_sessions: 16,
     sessions: %{},
     sess_qs: %{},
     ids: %{},
@@ -52,35 +53,42 @@ defmodule Karutte.Http3.Connection do
     pending: []
   ]
 
-  @doc "acceptor から呼ぶ。qconn の所有を移してから setup/0 を送ること。"
+  # ConnectionSup（DynamicSupervisor）配下の子。接続の死は再起動でなく掃除（temporary）。
+  def child_spec(opts) do
+    %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}, restart: :temporary}
+  end
+
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
-  @doc "link せずに起こす（一接続の事故をサーバ全体に波及させないため acceptor はこちら）。"
-  def start(opts), do: GenServer.start(__MODULE__, opts)
-
-  @doc "controlling_process で所有を移したあと、acceptor がこれを呼んで H3 を立ち上げる。"
+  @doc "acceptor が accept+handshake 済みの接続を controlling_process で移したあと、これを呼ぶ。"
   def setup(pid), do: GenServer.cast(pid, :setup)
 
   @impl true
   def init(opts) do
+    Process.flag(:trap_exit, true)
+
     {:ok,
      %__MODULE__{
        qconn: Keyword.fetch!(opts, :qconn),
        handler: Keyword.fetch!(opts, :handler),
-       handler_arg: Keyword.get(opts, :handler_arg)
+       handler_arg: Keyword.get(opts, :handler_arg),
+       max_sessions: Keyword.get(opts, :max_sessions, 16)
      }}
   end
 
-  # --- H3 立ち上げ（所有を得たあと） ---
-
+  # 所有を得たので H3 を立ち上げる（接続は acceptor で handshake 済み）。
   @impl true
-  def handle_cast(:setup, s) do
+  def handle_cast(:setup, s), do: {:noreply, do_setup(s)}
+
+  # --- H3 立ち上げ ---
+
+  defp do_setup(s) do
     {:ok, settings, machine} =
       :cow_http3_machine.init(:server, %{
         enable_connect_protocol: true,
         h3_datagram: true,
         enable_webtransport: true,
-        wt_max_sessions: 16,
+        wt_max_sessions: s.max_sessions,
         max_decode_table_size: 0,
         max_encode_table_size: 0,
         max_decode_blocked_streams: 0
@@ -111,15 +119,15 @@ defmodule Karutte.Http3.Connection do
       |> learn(enc, :local)
       |> learn(dec, :local)
 
-    # setup より先に届いていた quic メッセージ（controlling_process のフラッシュ）を再生。
+    # setup より先に届いていた quic メッセージ（フラッシュ分）を再生。
     pending = Enum.reverse(s.pending)
     s = %{s | pending: []}
-    {:noreply, Enum.reduce(pending, s, fn msg, acc -> replay(msg, acc) end)}
+    Enum.reduce(pending, s, fn msg, acc -> replay(msg, acc) end)
   end
 
   # --- quicer からのイベント ---
 
-  # machine が立つ前（setup 前）に来た quic メッセージは貯めておく。
+  # machine が立つ前（setup 前）に来た quic メッセージは貯めておく（フラッシュ分）。
   @impl true
   def handle_info({:quic, _, _, _} = msg, %{machine: nil} = s),
     do: {:noreply, %{s | pending: [msg | s.pending]}}
@@ -128,7 +136,9 @@ defmodule Karutte.Http3.Connection do
     arm_accept(s.qconn)
     id = sid(qs)
     dir = if Bitwise.band(id, 0x2) == 0, do: :bidi, else: :uni
-    :quicer.setopt(qs, :active, true)
+    # まず一束だけ受けて preface/種別を読む。種別が決まったら制御系は継続 active に、
+    # WT は demand 駆動（StreamServer が arm するまで passive ＝ QUIC の窓が背圧を持つ）。
+    :quicer.setopt(qs, :active, :once)
 
     # 単方向 peer ストリームは型を読む前に machine へ登録が要る。
     machine =
@@ -207,10 +217,27 @@ defmodule Karutte.Http3.Connection do
     {:noreply, close_session(s, sid)}
   end
 
+  # link した Session runner が落ちたら、その WT セッションを掃除する。
+  def handle_info({:EXIT, pid, _reason}, s) do
+    case Enum.find(s.sessions, fn {_id, p} -> p == pid end) do
+      {sid, _} -> {:noreply, forget_session(s, sid)}
+      nil -> {:noreply, s}
+    end
+  end
+
   def handle_info(other, s) do
     Logger.debug("Http3.Connection 未処理: #{inspect(other)}")
     {:noreply, s}
   end
+
+  @impl true
+  def terminate(_reason, %{qconn: qconn}) when qconn != nil do
+    # セッション runner は link で連れて落ちる。QUIC 接続だけ明示的に閉じる。
+    :quicer.async_shutdown_connection(qconn, 0, 0)
+    :ok
+  end
+
+  def terminate(_reason, _s), do: :ok
 
   @impl true
   def handle_call({:open_stream, dir, sid}, _from, s) do
@@ -257,6 +284,8 @@ defmodule Karutte.Http3.Connection do
     case :cow_http3.parse_unidi_stream_header(buf) do
       {:ok, type, rest} when type in [:control, :encoder, :decoder] ->
         {:ok, machine} = :cow_http3_machine.set_unidi_remote_stream_type(sid(qs), type, s.machine)
+        # 内部の制御系は継続して読む（低流量・背圧の対象外）。
+        :quicer.setopt(qs, :active, true)
         s = %{s | machine: machine} |> put_kind(qs, type) |> clear_buf(qs)
         on_stream_data(qs, rest, fin, s)
 
@@ -283,6 +312,8 @@ defmodule Karutte.Http3.Connection do
 
       _ ->
         # H3 リクエストストリーム。machine に登録してフレームを食わせる。
+        # CONNECT とその後のセッション capsule を継続して読む。
+        :quicer.setopt(qs, :active, true)
         machine = :cow_http3_machine.init_bidi_stream(sid(qs), s.machine)
         s = %{s | machine: machine} |> put_kind(qs, :request) |> clear_buf(qs)
         feed_request(s, qs, buf, fin)
@@ -381,13 +412,22 @@ defmodule Karutte.Http3.Connection do
 
   # CONNECT(webtransport) を受けたら 200 を返し、セッションを確立。
   defp on_request_headers(s, qs, pseudo) do
-    if pseudo[:method] == "CONNECT" and pseudo[:protocol] == "webtransport" do
-      accept_webtransport(s, qs)
-    else
-      # WT 以外は今は 404 で締める（軽い実装）。
-      respond(s, qs, 404, true)
-      :quicer.async_shutdown_stream(qs, @shutdown_graceful, 0)
-      s
+    cond do
+      pseudo[:method] != "CONNECT" or pseudo[:protocol] != "webtransport" ->
+        # WT 以外は 404 で締める。
+        s = respond(s, qs, 404, true)
+        :quicer.async_shutdown_stream(qs, @shutdown_graceful, 0)
+        s
+
+      map_size(s.sessions) >= s.max_sessions ->
+        # セッション上限。503 で断る（接続自体は生かす）。
+        Logger.info("WT セッション上限 (#{s.max_sessions}) 到達、CONNECT を拒否")
+        s = respond(s, qs, 503, true)
+        :quicer.async_shutdown_stream(qs, @shutdown_graceful, 0)
+        s
+
+      true ->
+        accept_webtransport(s, qs)
     end
   end
 
@@ -552,19 +592,26 @@ defmodule Karutte.Http3.Connection do
   # machine から wt_session と配下の wt_stream を消す。QUIC 接続は触らない。
   defp close_session(s, session_id) do
     case Map.get(s.sessions, session_id) do
-      nil ->
+      nil -> s
+      pid -> if(Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)); forget_session(s, session_id)
+    end
+  end
+
+  # マップと machine からセッションを除く（runner は既に止まっている/別経路で止める前提）。
+  # cow_http3_machine.close_webtransport_session は二重呼びで例外なので一度だけ。
+  defp forget_session(s, session_id) do
+    if Map.has_key?(s.sessions, session_id) do
+      machine =
+        if s.machine, do: :cow_http3_machine.close_webtransport_session(session_id, s.machine), else: s.machine
+
+      %{
         s
-
-      pid ->
-        if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
-        machine = :cow_http3_machine.close_webtransport_session(session_id, s.machine)
-
-        %{
-          s
-          | machine: machine,
-            sessions: Map.delete(s.sessions, session_id),
-            sess_qs: Map.delete(s.sess_qs, session_id)
-        }
+        | machine: machine,
+          sessions: Map.delete(s.sessions, session_id),
+          sess_qs: Map.delete(s.sess_qs, session_id)
+      }
+    else
+      s
     end
   end
 

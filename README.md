@@ -57,13 +57,22 @@ L1 の床（差し替え口の三つの実装）:
 runner（L2/L3/L4）は `normalize/1` 済みの `{:quic, …}` 契約だけを見る ＝ **床に依らない**。
 だから Session / StreamServer は HTTP/3 でも HTTP/2 でも同じコードで回る。
 
-HTTP/3 サーバ機構（`Karutte.Http3.*`）:
+HTTP/3 サーバ機構（`Karutte.Http3.*`）— 監視ツリーひと組:
 
-- `Karutte.Http3.Server` — quicer リスナ + acceptor。
+      Karutte.Http3.Server (Supervisor)        … child_spec/1 を持つ。自分のアプリに挿せる
+      ├── Karutte.Http3.Listener               … UDP ポートを開けっ放しにする番人
+      ├── ConnectionSup (DynamicSupervisor)    … 接続ごとの Connection（temporary）
+      └── Karutte.Http3.Acceptor × N           … 受け付け（permanent、落ちたら再起動）
+
 - `Karutte.Http3.Connection` — 接続ごとの GenServer。quicer の唯一の所有者として cow_http3_machine で
-  H3/QPACK/Extended CONNECT を捌き、WT ストリーム/datagram を runner へ振る。
+  H3/QPACK/Extended CONNECT を捌き、WT ストリーム/datagram を runner へ振る。複数 WT セッション・
+  セッション capsule（CLOSE/DRAIN）対応。terminate で接続を閉じる。
 - `Karutte.Http3.Cert` — 自己署名 ECDSA 証明書＋`serverCertificateHashes` 用の SHA-256。
 - `Karutte.Http3.Echo` — いちばん素朴な WebTransport ハンドラの例（受けたものを返す）。
+
+接続一つの事故は ConnectionSup の中で閉じ（サーバ全体は倒れない）、acceptor が落ちても再起動して
+受け付けは続く。背圧（AXIS 2）は WT ストリームを active:once で受けて以後は StreamServer の demand で
+QUIC の窓を動かす（垂れ流さない）。`max_sessions` で 1 接続あたりの WT セッション数を抑える。
 
 補助:
 
@@ -89,12 +98,14 @@ QUIC のフロー制御は三つあって、それぞれ別の場所に、同じ
 
 ## 確かめてあること
 
-`mix test` が緑（41 passed）。**実 QUIC で end-to-end が通っている**:
+`mix test` が緑（42 passed）。**実 QUIC で end-to-end が通っている**:
 
 - `test/http3_loopback_test.exs` — 最小 Elixir クライアント↔ H3 WebTransport サーバを実 quicer で繋ぐ:
   - connect → H3 SETTINGS → Extended CONNECT(webtransport) → 200 → WT 双方向ストリーム echo → datagram echo
   - 一つの H3 接続に**独立した二つの WT セッション**（session_id で振り分け）
   - **CLOSE_WEBTRANSPORT_SESSION capsule** でそのセッションだけ畳まれ、runner の terminate が走る
+
+  - **一接続の事故はサーバ全体を倒さない**（Connection を kill しても新しい接続は通る）
 
 そして **本物のブラウザ（Chrome 149）でも確認済み**: 自己署名証明書を `serverCertificateHashes`
 でピン留めして `new WebTransport("https://localhost:4433/")`、双方向ストリーム echo（"hi"→"hi"）と
@@ -117,9 +128,9 @@ behaviour 群はコンパイルが通り、跨りの型（`QuicTransport.stream(
 
 ## まだやっていないこと（正直に）
 
-- **軽い実装の割り切り。** 一接続で複数 WT セッション・CLOSE capsule は対応した。一方で
-  DRAIN capsule は記録のみ（新規ストリーム抑制は未）、CONNECT 以外のリクエストは 404、
-  GOAWAY・寿命まわりは最小限。"prod で軽く" の段（重い本番化はこの先）。
+- **DRAIN capsule は記録のみ**（新規ストリーム抑制までは未）。CONNECT 以外は 404、GOAWAY は最小限。
+- **telemetry / メトリクスは未**。ログは `Logger` で要所のみ。
+- **datagram の有界キュー（drop）は未**。今は来た分を制御面へ渡すだけ（off-axis の蓋は設定で、の段）。
 - **L2 の Plug 縫い目（`Karutte.WebTransportAdapter`）は別経路。** これは Bandit に WebTransport を
   載せる将来用の形で、いまの HTTP/3 サーバ（`Karutte.Http3.*`）は Bandit を介さず quicer に直に立つ。
 - **HTTP/2 の床はブラウザ非対応のフォールバック。** datagram は擬似（信頼・順序つき）になる。
@@ -128,6 +139,20 @@ behaviour 群はコンパイルが通り、跨りの型（`QuicTransport.stream(
 
 ```sh
 mix test
+```
+
+### アプリに組み込む
+
+`Karutte.Http3.Server` は監視ツリーひと組で `child_spec/1` を持つので、自分の supervision tree に
+そのまま子として挿せる:
+
+```elixir
+children = [
+  {Karutte.Http3.Server,
+   port: 4433, certfile: "priv/cert.pem", keyfile: "priv/key.pem",
+   handler: MyApp.WebTransportHandler, max_sessions: 16, acceptors: 4}
+]
+Supervisor.start_link(children, strategy: :one_for_one)
 ```
 
 ### ブラウザから繋ぐ（WebTransport over HTTP/3）
