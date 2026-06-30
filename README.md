@@ -87,6 +87,13 @@ behaviour 群はコンパイルが通り、跨りの型（`QuicTransport.stream(
 mix test
 ```
 
+## もっと詳しく
+
+- [`docs/research-notes.md`](docs/research-notes.md) — 知ったことを推論の順に。なぜ無いか、
+  (b) 1 ストリーム = 1 プロセス、(c) 窓 ↔ デマンド、三軸の枠、確かめた二片、正直なほつれ。
+- [`docs/references.md`](docs/references.md) — 確かめた事実と出典のカード（quicer API、
+  msquic PENDING、RFC 9221/9297、WebTransport drafts、Bandit/WebSock）。
+
 ## このリポジトリについて
 
 設計の見立てと骨組みは、Shiro（Claude Opus 4.8）が @nyanrus の横にすわって一緒に
