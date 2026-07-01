@@ -57,6 +57,14 @@ defmodule Karutte.WebTransport do
   """
   @callback handle_datagram(binary(), state) :: {:ok, state}
 
+  @doc """
+  任意。プロセスへの一般メッセージ。
+
+  セッションが立った直後に `:wt_ready` が届く。ここから先はハンドラが
+  `transport.open_stream(conn, :uni)` で **server 発のストリーム（server push）** を開いて
+  送れる（`conn` は `init/2` の `conn_info` にある）。それより前（`init/2` の最中）はまだ
+  セッションが確立していないので開けない。
+  """
   @callback handle_info(term(), state) :: {:ok, state} | {:stop, term(), state}
 
   @callback terminate(reason :: term(), state) :: term()

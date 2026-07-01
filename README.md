@@ -85,6 +85,10 @@ HTTP/3 サーバ機構（`Karutte.Http3.*`）— 監視ツリーひと組:
 - **認証・ルーティング**: CONNECT の `:path` / `:authority` / ヘッダを `conn_info` でハンドラに渡す。
   任意の `authorize/1` 門番で `:ok` / `{:reject, status}` を返せる（path やトークンで受理/拒否）。
   受理のときだけ 200、拒否は指定 status で断る。
+- **server push**: セッションが立つと handler に `:wt_ready` が届く。そこで `transport.open_stream(conn, :uni)`
+  で server 発の単方向ストリームを開いて送れる（server → client の push）。
+- **並行性**: handshake は acceptor でなく **Connection（所有者）自身**が回す ＝ 接続ごとに並行、
+  かつ「accept と所有権移譲の隙にクライアントの早いストリームが落ちる」窓も無い。
 - **観測**: `[:karutte, :http3, …]` の telemetry イベント（connection start/stop/drain, session open/close/rejected,
   datagram dropped, connection rejected, stream refused）。
 - **graceful shutdown**: `Karutte.Http3.Server.drain(name, grace_ms)` で、acceptor を止め（新規を受けない）、
@@ -116,7 +120,7 @@ QUIC のフロー制御は三つあって、それぞれ別の場所に、同じ
 
 ## 確かめてあること
 
-`mix test` が緑（50 passed）。**実 QUIC で end-to-end が通っている**:
+`mix test` が緑（53 passed）。**実 QUIC で end-to-end が通っている**:
 
 - `test/http3_loopback_test.exs` — 最小 Elixir クライアント↔ H3 WebTransport サーバを実 quicer で繋ぐ:
   - connect → H3 SETTINGS → Extended CONNECT(webtransport) → 200 → WT 双方向ストリーム echo → datagram echo
@@ -132,6 +136,8 @@ QUIC のフロー制御は三つあって、それぞれ別の場所に、同じ
   - **authorize/1 での認証**（path が "/ok" は 200、それ以外は 403）
   - **大きなペイロード（64KB）が多フレーム跨ぎで整合したまま往復**
   - **demand 駆動（active: :once）でも 32KB が取りこぼしなく往復**（背圧ループの volume 検証）
+  - **server push**（handler が `:wt_ready` で server 発 uni ストリームを開き、クライアントに届く）
+  - **多接続同時 echo**（8 接続並行）／ **一接続で多ストリーム同時 echo**（20 本を handle 別に demux）
 
 そして **本物のブラウザ（Chrome 149）でも確認済み**: 自己署名証明書を `serverCertificateHashes`
 でピン留めして `new WebTransport("https://localhost:4433/")`、双方向ストリーム echo（"hi"→"hi"）と
@@ -155,6 +161,8 @@ behaviour 群はコンパイルが通り、跨りの型（`QuicTransport.stream(
 ## まだやっていないこと（正直に）
 
 - **CONNECT 以外のリクエストは 404**（WebTransport 専用）。
+- **server 発の双方向ストリームの受信側は未配線**（server push は uni = 送るだけを想定。bidi の
+  server-initiated を read するには owner の付け方をもう一段足す要がある）。
 - **L2 の Plug 縫い目（`Karutte.WebTransportAdapter`）は別経路。** これは Bandit に WebTransport を
   載せる将来用の形で、いまの HTTP/3 サーバ（`Karutte.Http3.*`）は Bandit を介さず quicer に直に立つ。
 - **HTTP/2 の床はブラウザ非対応のフォールバック。** datagram は擬似（信頼・順序つき）になる。

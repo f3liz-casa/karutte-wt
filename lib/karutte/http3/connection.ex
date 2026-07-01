@@ -62,7 +62,7 @@ defmodule Karutte.Http3.Connection do
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
-  @doc "acceptor が accept+handshake 済みの接続を controlling_process で移したあと、これを呼ぶ。"
+  @doc "acceptor が accept 済みの接続を controlling_process で移したあと、これを呼ぶ。handshake から。"
   def setup(pid), do: GenServer.cast(pid, :setup)
 
   @doc "graceful shutdown: H3 GOAWAY を送り、各 WT セッションに DRAIN capsule を配る。"
@@ -82,9 +82,15 @@ defmodule Karutte.Http3.Connection do
      }}
   end
 
-  # 所有を得たので H3 を立ち上げる（接続は acceptor で handshake 済み）。
+  # 所有を得たので、まず handshake（自分のプロセスで＝並行かつイベント取りこぼしなし）、
+  # 続けて H3 を立ち上げる。
   @impl true
-  def handle_cast(:setup, s), do: {:noreply, do_setup(s)}
+  def handle_cast(:setup, s) do
+    case :quicer.handshake(s.qconn) do
+      {:ok, _} -> {:noreply, do_setup(s)}
+      {:error, reason} -> {:stop, {:shutdown, {:handshake, reason}}, s}
+    end
+  end
 
   # graceful shutdown。新規は受けない合図（GOAWAY）＋各セッションに DRAIN を送る。
   # 実際に閉じるのは呼び手（Server.drain）が猶予のあとで。
@@ -275,9 +281,19 @@ defmodule Karutte.Http3.Connection do
   @impl true
   def handle_call({:open_stream, dir, sid}, _from, s) do
     flag = if dir == :uni, do: @open_uni, else: 0
+    # cowlib は方向を :unidi / :bidi で表す（こちらの :uni / :bidi と綴りが違う）。
+    wt_dir = if dir == :uni, do: :unidi, else: :bidi
     {:ok, qs} = :quicer.start_stream(s.qconn, %{open_flag: flag, active: true})
-    :quicer.send(qs, :cow_http3.webtransport_stream_header(sid, dir))
-    {:ok, machine} = :cow_http3_machine.become_webtransport_stream(sid(qs), sid, s.machine)
+    :quicer.send(qs, :cow_http3.webtransport_stream_header(sid, wt_dir))
+
+    # server 発ストリームも become の前に machine 登録が要る（uni は local unidi）。
+    machine =
+      case dir do
+        :uni -> :cow_http3_machine.init_unidi_stream(sid(qs), :unidi_local, s.machine)
+        :bidi -> :cow_http3_machine.init_bidi_stream(sid(qs), s.machine)
+      end
+
+    {:ok, machine} = :cow_http3_machine.become_webtransport_stream(sid(qs), sid, machine)
 
     s =
       %{s | machine: machine}
@@ -495,6 +511,8 @@ defmodule Karutte.Http3.Connection do
         s = respond(s, qs, 200, false)
         machine = :cow_http3_machine.become_webtransport_session(id, s.machine)
         telem([:session, :open], %{session_id: id, path: pseudo[:path]})
+        # セッションが立った合図。ここから先はハンドラが server 発ストリームを開ける。
+        Kernel.send(pid, :wt_ready)
 
         %{s | machine: machine, sessions: Map.put(s.sessions, id, pid), sess_qs: Map.put(s.sess_qs, id, qs)}
         |> put_kind(qs, :session)

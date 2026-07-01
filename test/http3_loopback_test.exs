@@ -22,6 +22,23 @@ defmodule Karutte.Http3.NotifyEcho do
   end
 end
 
+# セッションが立ったら server 発の単方向ストリームを開いて push する（server push の検証用）。
+defmodule Karutte.Http3.Pusher do
+  @behaviour Karutte.WebTransport
+  @impl true
+  def init(_arg, ci), do: {:ok, ci}
+  @impl true
+  def handle_stream(_s, _d, st), do: {{:reset, 0}, st}
+  @impl true
+  def handle_info(:wt_ready, st) do
+    {:ok, stream} = st.transport.open_stream(st.conn, :uni)
+    st.transport.send(stream, "server-push", fin: true)
+    {:ok, st}
+  end
+
+  def handle_info(_msg, st), do: {:ok, st}
+end
+
 # demand を一度に一束（active: :once）にする echo。背圧ループ（再 arm）を volume 下で試す用。
 defmodule Karutte.Http3.DemandEcho do
   @behaviour Karutte.WebTransport
@@ -335,7 +352,152 @@ defmodule Karutte.Http3.LoopbackTest do
     :quicer.shutdown_connection(conn)
   end
 
+  test "多数の接続が同時に echo できる（acceptor プール／ConnectionSup）" do
+    tmp = Path.join(System.tmp_dir!(), "karutte_h3cc_#{System.unique_integer([:positive])}")
+    {:ok, cert} = Karutte.Http3.Cert.generate(tmp)
+    port = 14_441
+
+    start_supervised!(
+      {Karutte.Http3.Server,
+       port: port,
+       certfile: cert.certfile,
+       keyfile: cert.keyfile,
+       handler: Karutte.Http3.Echo,
+       acceptors: 8,
+       name: Karutte.Http3.Server.ConcT}
+    )
+
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    n = 8
+
+    results =
+      1..n
+      |> Task.async_stream(
+        fn i ->
+          conn = connect(port)
+          {sid, _} = open_session(conn)
+          msg = "conn-#{i}"
+          got = wt_bidi_echo(conn, sid, msg)
+          :quicer.shutdown_connection(conn)
+          {msg, got}
+        end,
+        max_concurrency: n,
+        timeout: 20_000
+      )
+      |> Enum.map(fn {:ok, v} -> v end)
+
+    assert length(results) == n
+    assert Enum.all?(results, fn {msg, got} -> msg == got end)
+  end
+
+  test "一接続で多数のストリームが同時に echo できる", %{port: port} do
+    conn = connect(port)
+    {sid, _} = open_session(conn)
+
+    pending =
+      for i <- 1..20, into: %{} do
+        {:ok, wt} = :quicer.start_stream(conn, %{open_flag: 0, active: true})
+        msg = "stream-#{i}"
+        :quicer.send(wt, [:cow_http3.webtransport_stream_header(sid, :bidi), msg])
+        {wt, {msg, byte_size(msg), <<>>}}
+      end
+
+    got = collect_echoes(pending)
+    assert Enum.all?(got, fn {msg, acc} -> msg == acc end)
+    assert map_size(got) == 20
+
+    :quicer.shutdown_connection(conn)
+  end
+
+  test "server push: ハンドラが server 発の単方向ストリームを開いてクライアントに届く" do
+    tmp = Path.join(System.tmp_dir!(), "karutte_h3p_#{System.unique_integer([:positive])}")
+    {:ok, cert} = Karutte.Http3.Cert.generate(tmp)
+    port = 14_440
+
+    start_supervised!(
+      {Karutte.Http3.Server,
+       port: port,
+       certfile: cert.certfile,
+       keyfile: cert.keyfile,
+       handler: Karutte.Http3.Pusher,
+       acceptors: 1,
+       name: Karutte.Http3.Server.PushT}
+    )
+
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    conn = connect(port)
+    {sid, _req} = open_session(conn)
+
+    # ハンドラは :wt_ready で server 発 uni ストリームを開き "server-push" を送る。
+    assert "server-push" == collect_wt_uni(sid, byte_size("server-push"))
+    :quicer.shutdown_connection(conn)
+  end
+
   # ================= クライアント・ヘルパ =================
+
+  # 複数ストリームの echo を handle 別に demux して集める。
+  # pending: %{wt => {msg, want, acc}} → 全部 want バイト揃ったら %{msg => acc} を返す。
+  defp collect_echoes(pending) do
+    if Enum.all?(pending, fn {_wt, {_msg, want, acc}} -> byte_size(acc) >= want end) do
+      Map.new(pending, fn {_wt, {msg, _want, acc}} -> {msg, acc} end)
+    else
+      receive do
+        {:quic, bin, wt, _} when is_binary(bin) and is_map_key(pending, wt) ->
+          {msg, want, acc} = pending[wt]
+          collect_echoes(Map.put(pending, wt, {msg, want, acc <> bin}))
+
+        {:quic, _o, _, _} ->
+          collect_echoes(pending)
+      after
+        @recv_timeout -> flunk("multi-stream echo 未達")
+      end
+    end
+  end
+
+  # server 発の単方向 WT ストリーム（0x54, sid）を探して payload を want バイト集める。
+  # サーバの control/qpack unidi ストリームは種別で弾く。
+  defp collect_wt_uni(sid, want, streams \\ %{}, payload \\ nil) do
+    if payload && byte_size(payload) >= want do
+      payload
+    else
+      receive do
+        {:quic, :new_stream, s, _} ->
+          :quicer.setopt(s, :active, true)
+          collect_wt_uni(sid, want, Map.put_new(streams, s, {:unknown, <<>>}), payload)
+
+        {:quic, bin, s, _} when is_binary(bin) ->
+          {streams, payload} = feed_uni(sid, s, bin, streams, payload)
+          collect_wt_uni(sid, want, streams, payload)
+
+        {:quic, _o, _, _} ->
+          collect_wt_uni(sid, want, streams, payload)
+      after
+        @recv_timeout -> flunk("server push (WT uni) 来ず (payload=#{inspect(payload)})")
+      end
+    end
+  end
+
+  defp feed_uni(sid, s, bin, streams, payload) do
+    case Map.get(streams, s, {:unknown, <<>>}) do
+      {:wt, _} ->
+        {streams, (payload || <<>>) <> bin}
+
+      :other ->
+        {streams, payload}
+
+      {:unknown, buf} ->
+        buf = buf <> bin
+
+        case :cow_http3.parse_unidi_stream_header(buf) do
+          {:ok, {:webtransport, ^sid}, rest} -> {Map.put(streams, s, {:wt, true}), (payload || <<>>) <> rest}
+          {:ok, _t, _} -> {Map.put(streams, s, :other), payload}
+          {:undefined, _} -> {Map.put(streams, s, :other), payload}
+          :more -> {Map.put(streams, s, {:unknown, buf}), payload}
+        end
+    end
+  end
 
   # CONNECT を path 指定で送り、:status を返す（受理/拒否の確認用）。
   defp request_status(conn, path) do
@@ -392,21 +554,10 @@ defmodule Karutte.Http3.LoopbackTest do
   end
 
   # 接続して H3 を立ち上げる（control/encoder/decoder + SETTINGS）。conn を返す。
-  defp connect(port) do
-    {:ok, conn} =
-      :quicer.connect(
-        ~c"localhost",
-        port,
-        [
-          {:alpn, [~c"h3"]},
-          {:verify, :none},
-          {:peer_unidi_stream_count, 256},
-          {:peer_bidi_stream_count, 256},
-          {:datagram_send_enabled, 1},
-          {:datagram_receive_enabled, 1}
-        ],
-        @recv_timeout
-      )
+  # 一気に多数繋ぐと msquic の accept backlog が瞬間的に溢れて connection_refused に
+  # なりうるので、過渡的エラーは軽くリトライする（本物のクライアントもそうする）。
+  defp connect(port, tries \\ 5) do
+    conn = do_quic_connect(port, tries)
 
     {:ok, ctrl} = :quicer.start_stream(conn, %{open_flag: 1, active: true})
     {:ok, enc} = :quicer.start_stream(conn, %{open_flag: 1, active: true})
@@ -416,6 +567,29 @@ defmodule Karutte.Http3.LoopbackTest do
     :quicer.send(enc, <<2>>)
     :quicer.send(dec, <<3>>)
     conn
+  end
+
+  defp do_quic_connect(port, tries) do
+    opts = [
+      {:alpn, [~c"h3"]},
+      {:verify, :none},
+      {:peer_unidi_stream_count, 256},
+      {:peer_bidi_stream_count, 256},
+      {:datagram_send_enabled, 1},
+      {:datagram_receive_enabled, 1}
+    ]
+
+    case :quicer.connect(~c"localhost", port, opts, @recv_timeout) do
+      {:ok, conn} ->
+        conn
+
+      {:error, _, _} when tries > 1 ->
+        Process.sleep(50)
+        do_quic_connect(port, tries - 1)
+
+      {:error, reason, info} ->
+        flunk("connect 失敗: #{inspect({reason, info})}")
+    end
   end
 
   # Extended CONNECT(webtransport) を一本立てて 200 を受ける。{session_id, req_stream} を返す。

@@ -38,11 +38,13 @@ defmodule Karutte.Http3.Acceptor do
 
   @impl true
   def handle_continue(:accept, s) do
-    with {:ok, conn} <- :quicer.accept(s.listener, [], :infinity),
-         {:ok, conn} <- :quicer.handshake(conn) do
-      spawn_connection(conn, s)
-    else
-      {:error, reason} -> Logger.debug("accept/handshake 失敗: #{inspect(reason)}")
+    # accept したら即 Connection へ所有権を渡す。handshake は Connection 側でやる
+    # （acceptor が抱えると、handshake 直後〜引き渡しの隙にクライアントの早いストリーム
+    # イベントが acceptor のメールボックスに落ちて失われる。かつ handshake が acceptor
+    # 直列になる。所有者=Connection が handshake すればどちらも消える）。
+    case :quicer.accept(s.listener, [], :infinity) do
+      {:ok, conn} -> spawn_connection(conn, s)
+      {:error, reason} -> Logger.debug("accept 失敗: #{inspect(reason)}")
     end
 
     {:noreply, s, {:continue, :accept}}
