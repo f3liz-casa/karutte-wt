@@ -39,6 +39,22 @@ defmodule Karutte.Http3.Pusher do
   def handle_info(_msg, st), do: {:ok, st}
 end
 
+# セッションが立ったら server 発の双方向ストリームを echo runner 付きで開く（server bidi の検証用）。
+defmodule Karutte.Http3.BidiPusher do
+  @behaviour Karutte.WebTransport
+  @impl true
+  def init(_arg, ci), do: {:ok, ci}
+  @impl true
+  def handle_stream(_s, _d, st), do: {{:reset, 0}, st}
+  @impl true
+  def handle_info(:wt_ready, st) do
+    {:ok, _stream} = st.transport.open_stream(st.conn, :bidi, handler: Karutte.Http3.Echo.Stream)
+    {:ok, st}
+  end
+
+  def handle_info(_msg, st), do: {:ok, st}
+end
+
 # demand を一度に一束（active: :once）にする echo。背圧ループ（再 arm）を volume 下で試す用。
 defmodule Karutte.Http3.DemandEcho do
   @behaviour Karutte.WebTransport
@@ -435,7 +451,63 @@ defmodule Karutte.Http3.LoopbackTest do
     :quicer.shutdown_connection(conn)
   end
 
+  test "server 発の双方向ストリームを client が読み書きできる（echo runner 付き）" do
+    tmp = Path.join(System.tmp_dir!(), "karutte_h3b_#{System.unique_integer([:positive])}")
+    {:ok, cert} = Karutte.Http3.Cert.generate(tmp)
+    port = 14_442
+
+    start_supervised!(
+      {Karutte.Http3.Server,
+       port: port,
+       certfile: cert.certfile,
+       keyfile: cert.keyfile,
+       handler: Karutte.Http3.BidiPusher,
+       acceptors: 1,
+       name: Karutte.Http3.Server.BidiPushT}
+    )
+
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    conn = connect(port)
+    {sid, _} = open_session(conn)
+
+    # server が開いた bidi ストリームを受け取り、書いて echo を受ける。
+    wt = recv_server_bidi(sid)
+    :quicer.send(wt, "hey")
+    assert "hey" == recv_raw(wt, 3)
+
+    :quicer.shutdown_connection(conn)
+  end
+
   # ================= クライアント・ヘルパ =================
+
+  # server 発の bidi WT ストリームを待ち、preface を剥がして handle を返す。
+  defp recv_server_bidi(sid) do
+    receive do
+      {:quic, :new_stream, s, _} ->
+        :quicer.setopt(s, :active, true)
+        strip_bidi_preface(s, sid, <<>>)
+
+      {:quic, _o, _, _} ->
+        recv_server_bidi(sid)
+    after
+      @recv_timeout -> flunk("server 発 bidi 来ず")
+    end
+  end
+
+  defp strip_bidi_preface(s, sid, buf) do
+    case :cow_http3.parse(buf) do
+      {:webtransport_stream_header, ^sid, _rest} ->
+        s
+
+      _ ->
+        receive do
+          {:quic, bin, ^s, _} when is_binary(bin) -> strip_bidi_preface(s, sid, buf <> bin)
+        after
+          @recv_timeout -> flunk("bidi preface 来ず")
+        end
+    end
+  end
 
   # 複数ストリームの echo を handle 別に demux して集める。
   # pending: %{wt => {msg, want, acc}} → 全部 want バイト揃ったら %{msg => acc} を返す。

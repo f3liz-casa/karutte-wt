@@ -25,8 +25,8 @@ defmodule Karutte.QuicTransport.Http3 do
   @type stream :: {:h3s, pid(), term()}
 
   @impl true
-  def open_stream({:h3c, conn_pid, _qconn, sid}, dir, _opts \\ []) do
-    GenServer.call(conn_pid, {:open_stream, dir, sid})
+  def open_stream({:h3c, conn_pid, _qconn, sid}, dir, opts \\ []) do
+    GenServer.call(conn_pid, {:open_stream, dir, sid, opts})
   end
 
   @impl true

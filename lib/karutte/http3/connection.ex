@@ -20,7 +20,7 @@ defmodule Karutte.Http3.Connection do
   use GenServer
   require Logger
 
-  alias Karutte.WebTransport.Session
+  alias Karutte.WebTransport.{Session, StreamServer}
 
   @transport Karutte.QuicTransport.Http3
 
@@ -255,11 +255,24 @@ defmodule Karutte.Http3.Connection do
     {:noreply, close_session(s, sid)}
   end
 
-  # link した Session runner が落ちたら、その WT セッションを掃除する。
-  def handle_info({:EXIT, pid, _reason}, s) do
-    case Enum.find(s.sessions, fn {_id, p} -> p == pid end) do
-      {sid, _} -> {:noreply, forget_session(s, sid)}
-      nil -> {:noreply, s}
+  # link した子が落ちたときの後始末。Session runner ならそのセッションを掃除、
+  # server 発ストリームの StreamServer なら、異常終了ならそのストリームを reset。
+  def handle_info({:EXIT, pid, reason}, s) do
+    cond do
+      (sid = Enum.find_value(s.sessions, fn {id, p} -> p == pid && id end)) != nil ->
+        {:noreply, forget_session(s, sid)}
+
+      (qs = Enum.find_value(s.wt_owner, fn {q, p} -> p == pid && q end)) != nil ->
+        case reason do
+          :normal -> :ok
+          {:shutdown, _} -> :ok
+          _ -> :quicer.async_shutdown_stream(qs, @shutdown_abort_send + @shutdown_abort_receive, 0)
+        end
+
+        {:noreply, drop_stream(s, qs)}
+
+      true ->
+        {:noreply, s}
     end
   end
 
@@ -279,7 +292,7 @@ defmodule Karutte.Http3.Connection do
   def terminate(_reason, _s), do: :ok
 
   @impl true
-  def handle_call({:open_stream, dir, sid}, _from, s) do
+  def handle_call({:open_stream, dir, sid, opts}, _from, s) do
     flag = if dir == :uni, do: @open_uni, else: 0
     # cowlib は方向を :unidi / :bidi で表す（こちらの :uni / :bidi と綴りが違う）。
     wt_dir = if dir == :uni, do: :unidi, else: :bidi
@@ -301,6 +314,26 @@ defmodule Karutte.Http3.Connection do
       |> put_kind(qs, :wt)
       |> put_dir(qs, dir)
       |> put_wt_sess(qs, sid)
+
+    # handler が指定されたら（server 発 bidi の read 用）、この Connection が StreamServer を
+    # 起こして owner にする。受信は既存の route_wt で流れ、handoff は空バッファで即完了。
+    s =
+      case Keyword.get(opts, :handler) do
+        nil ->
+          s
+
+        mod ->
+          {:ok, pid} =
+            StreamServer.start_link(
+              transport: @transport,
+              stream: h3s(s, qs),
+              handler: mod,
+              init_arg: Keyword.get(opts, :init_arg)
+            )
+
+          Kernel.send(pid, {:handoff_done, h3s(s, qs), []})
+          %{s | wt_owner: Map.put(s.wt_owner, qs, pid)}
+      end
 
     {:reply, {:ok, h3s(s, qs)}, s}
   end
