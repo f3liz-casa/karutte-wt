@@ -36,6 +36,17 @@ defmodule Karutte.Http3.SlowDatagram do
   end
 end
 
+# authorize/1 で path が "/ok" の CONNECT だけ受ける門番（認証の検証用）。
+defmodule Karutte.Http3.PathAuth do
+  @behaviour Karutte.WebTransport
+  @impl true
+  def authorize(ci), do: if(ci.path == "/ok", do: :ok, else: {:reject, 403})
+  @impl true
+  def init(_arg, ci), do: {:ok, ci}
+  @impl true
+  def handle_stream(_s, _d, st), do: {{:handler, Karutte.Http3.Echo.Stream, nil}, st}
+end
+
 defmodule Karutte.Http3.LoopbackTest do
   use ExUnit.Case
 
@@ -239,7 +250,50 @@ defmodule Karutte.Http3.LoopbackTest do
     :quicer.shutdown_connection(conn)
   end
 
+  test "ハンドラは authorize/1 で path ごとに CONNECT を受理/拒否できる（認証）" do
+    tmp = Path.join(System.tmp_dir!(), "karutte_h3a_#{System.unique_integer([:positive])}")
+    {:ok, cert} = Karutte.Http3.Cert.generate(tmp)
+    port = 14_438
+
+    start_supervised!(
+      {Karutte.Http3.Server,
+       port: port,
+       certfile: cert.certfile,
+       keyfile: cert.keyfile,
+       handler: Karutte.Http3.PathAuth,
+       acceptors: 1,
+       name: Karutte.Http3.Server.AuthT}
+    )
+
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    conn = connect(port)
+    assert "200" == request_status(conn, "/ok")
+    assert "403" == request_status(conn, "/nope")
+    :quicer.shutdown_connection(conn)
+  end
+
   # ================= クライアント・ヘルパ =================
+
+  # CONNECT を path 指定で送り、:status を返す（受理/拒否の確認用）。
+  defp request_status(conn, path) do
+    {:ok, req} = :quicer.start_stream(conn, %{open_flag: 0, active: true})
+    {:ok, sid} = :quicer.get_stream_id(req)
+
+    headers = [
+      {":method", "CONNECT"},
+      {":scheme", "https"},
+      {":authority", "localhost"},
+      {":path", path},
+      {":protocol", "webtransport"}
+    ]
+
+    {:ok, block, _ins, _enc} =
+      :cow_qpack.encode_field_section(headers, sid, :cow_qpack.init(:encoder, 0, 0))
+
+    :quicer.send(req, :cow_http3.headers(block))
+    recv_response_status(req, sid)
+  end
 
   defp recv_capsule(stream, buf \\ <<>>) do
     case :cow_capsule.parse(buf) do

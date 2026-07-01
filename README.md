@@ -82,8 +82,11 @@ HTTP/3 サーバ機構（`Karutte.Http3.*`）— 監視ツリーひと組:
   動かす（垂れ流さない）。**datagram（軸の外）は有界 drop**（RFC 9221 どおり、runner のメールボックスが
   `max_datagram_queue` を超えたら落とす。ブロックしない）。
 - **上限**: `max_sessions`（1 接続あたり WT セッション）、`max_connections`（同時接続。超過は静かに断る）。
-- **観測**: `[:karutte, :http3, …]` の telemetry イベント（connection start/stop/drain, session open/close,
-  datagram dropped, connection rejected）。
+- **認証・ルーティング**: CONNECT の `:path` / `:authority` / ヘッダを `conn_info` でハンドラに渡す。
+  任意の `authorize/1` 門番で `:ok` / `{:reject, status}` を返せる（path やトークンで受理/拒否）。
+  受理のときだけ 200、拒否は指定 status で断る。
+- **観測**: `[:karutte, :http3, …]` の telemetry イベント（connection start/stop/drain, session open/close/rejected,
+  datagram dropped, connection rejected, stream refused）。
 - **graceful shutdown**: `Karutte.Http3.Server.drain(name, grace_ms)` で、acceptor を止め（新規を受けない）、
   各接続に H3 GOAWAY ＋各 WT セッションへ DRAIN capsule を配り、猶予のあとツリーごと停止。
   ローリング再起動でクライアントを穏やかに移す。**ドレイン中のセッションは新規ストリームを reset で断る**
@@ -113,7 +116,7 @@ QUIC のフロー制御は三つあって、それぞれ別の場所に、同じ
 
 ## 確かめてあること
 
-`mix test` が緑（47 passed）。**実 QUIC で end-to-end が通っている**:
+`mix test` が緑（48 passed）。**実 QUIC で end-to-end が通っている**:
 
 - `test/http3_loopback_test.exs` — 最小 Elixir クライアント↔ H3 WebTransport サーバを実 quicer で繋ぐ:
   - connect → H3 SETTINGS → Extended CONNECT(webtransport) → 200 → WT 双方向ストリーム echo → datagram echo
@@ -126,6 +129,7 @@ QUIC のフロー制御は三つあって、それぞれ別の場所に、同じ
   - **ストリームハンドラのクラッシュ隔離**（`l2_test.exs`: handle_in が raise → そのストリームだけ reset、セッションは生存）
   - **graceful drain**（`Server.drain` でセッションに DRAIN capsule が届く）
   - **DRAIN 後の新規ストリーム拒否**（peer から DRAIN → 以後の WT ストリームは reset される）
+  - **authorize/1 での認証**（path が "/ok" は 200、それ以外は 403）
 
 そして **本物のブラウザ（Chrome 149）でも確認済み**: 自己署名証明書を `serverCertificateHashes`
 でピン留めして `new WebTransport("https://localhost:4433/")`、双方向ストリーム echo（"hi"→"hi"）と

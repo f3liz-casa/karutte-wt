@@ -205,6 +205,7 @@ defmodule Karutte.Http3.Connection do
   def handle_info({:quic, :connected, _c, _}, s), do: {:noreply, s}
   def handle_info({:quic, :streams_available, _c, _}, s), do: {:noreply, s}
   def handle_info({:quic, :send_complete, _stream, _}, s), do: {:noreply, s}
+  def handle_info({:quic, :send_shutdown_complete, _stream, _}, s), do: {:noreply, s}
   def handle_info({:quic, :peer_receive_aborted, _stream, _}, s), do: {:noreply, s}
 
   def handle_info({:quic, event, _c, _}, s)
@@ -417,10 +418,10 @@ defmodule Karutte.Http3.Connection do
       {:ok, machine} ->
         %{s | machine: machine}
 
-      {:ok, {:headers, _headers, pseudo, _len}, instr, machine} ->
+      {:ok, {:headers, headers, pseudo, _len}, instr, machine} ->
         s = %{s | machine: machine}
         s = flush_instr(s, instr)
-        on_request_headers(s, qs, pseudo)
+        on_request_headers(s, qs, pseudo, headers)
 
       {:ok, {:data, _data}, machine} ->
         # リクエストボディ。WT には使わない。
@@ -442,46 +443,70 @@ defmodule Karutte.Http3.Connection do
     end
   end
 
-  # CONNECT(webtransport) を受けたら 200 を返し、セッションを確立。
-  defp on_request_headers(s, qs, pseudo) do
+  # CONNECT(webtransport) を受けたら、ハンドラに諮って 200 か 4xx を返す。
+  defp on_request_headers(s, qs, pseudo, headers) do
     cond do
       pseudo[:method] != "CONNECT" or pseudo[:protocol] != "webtransport" ->
         # WT 以外は 404 で締める。
-        s = respond(s, qs, 404, true)
-        :quicer.async_shutdown_stream(qs, @shutdown_graceful, 0)
-        s
+        reject(s, qs, 404)
 
       map_size(s.sessions) >= s.max_sessions ->
         # セッション上限。503 で断る（接続自体は生かす）。
         Logger.info("WT セッション上限 (#{s.max_sessions}) 到達、CONNECT を拒否")
-        s = respond(s, qs, 503, true)
-        :quicer.async_shutdown_stream(qs, @shutdown_graceful, 0)
-        s
+        reject(s, qs, 503)
 
       true ->
-        accept_webtransport(s, qs)
+        accept_webtransport(s, qs, pseudo, headers)
     end
   end
 
-  defp accept_webtransport(s, qs) do
+  defp reject(s, qs, status) do
+    s = respond(s, qs, status, true)
+    :quicer.async_shutdown_stream(qs, @shutdown_graceful, 0)
+    s
+  end
+
+  # request 情報（path/authority/headers）をハンドラの門番 authorize/1 に諮り、
+  # :ok なら 200 でセッションを起こす。{:reject, status} なら断る（認証・ルーティング）。
+  defp accept_webtransport(s, qs, pseudo, headers) do
     id = sid(qs)
-    s = respond(s, qs, 200, false)
-    machine = :cow_http3_machine.become_webtransport_session(id, s.machine)
     conn = {:h3c, self(), s.qconn, id}
 
-    {:ok, pid} =
-      Session.start_link(
-        transport: @transport,
-        conn: conn,
-        handler: s.handler,
-        init_arg: s.handler_arg,
-        conn_info: %{transport: @transport, conn: conn}
-      )
+    conn_info = %{
+      transport: @transport,
+      conn: conn,
+      path: pseudo[:path],
+      authority: pseudo[:authority],
+      headers: headers
+    }
 
-    telem([:session, :open], %{session_id: id})
+    case authorize(s.handler, conn_info) do
+      :ok ->
+        {:ok, pid} =
+          Session.start_link(
+            transport: @transport,
+            conn: conn,
+            handler: s.handler,
+            init_arg: s.handler_arg,
+            conn_info: conn_info
+          )
 
-    %{s | machine: machine, sessions: Map.put(s.sessions, id, pid), sess_qs: Map.put(s.sess_qs, id, qs)}
-    |> put_kind(qs, :session)
+        # 200 は stream がまだ bidi のうちに返す（そのあと wt_session 化する）。
+        s = respond(s, qs, 200, false)
+        machine = :cow_http3_machine.become_webtransport_session(id, s.machine)
+        telem([:session, :open], %{session_id: id, path: pseudo[:path]})
+
+        %{s | machine: machine, sessions: Map.put(s.sessions, id, pid), sess_qs: Map.put(s.sess_qs, id, qs)}
+        |> put_kind(qs, :session)
+
+      {:reject, status} ->
+        telem([:session, :rejected], %{path: pseudo[:path], status: status})
+        reject(s, qs, status)
+    end
+  end
+
+  defp authorize(handler, conn_info) do
+    if function_exported?(handler, :authorize, 1), do: handler.authorize(conn_info), else: :ok
   end
 
   defp respond(s, qs, status, fin?) do

@@ -28,6 +28,15 @@ defmodule Karutte.WebTransport do
           | {:inline, max_bytes :: pos_integer()}
           | {:reset, QuicTransport.code()}
 
+  @doc """
+  任意。CONNECT を受けるか諮る。セッションを起こす前に呼ばれる。
+
+  `conn_info` には `:path` / `:authority` / `:headers`（Extended CONNECT の中身）が入る。
+  `:ok` で受け（200）、`{:reject, status}` で断る（その status を返してストリームを閉じる）。
+  認証・ルーティングの門番。実装が無ければ常に受ける。
+  """
+  @callback authorize(conn_info :: map()) :: :ok | {:reject, 100..599}
+
   @callback init(session :: term(), conn_info :: map()) :: {:ok, state} | {:stop, term()}
 
   @doc """
@@ -52,7 +61,8 @@ defmodule Karutte.WebTransport do
 
   @callback terminate(reason :: term(), state) :: term()
 
-  @optional_callbacks handle_inline_stream: 3,
+  @optional_callbacks authorize: 1,
+                      handle_inline_stream: 3,
                       handle_datagram: 2,
                       handle_info: 2,
                       terminate: 2
