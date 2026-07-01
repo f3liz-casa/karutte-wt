@@ -22,6 +22,20 @@ defmodule Karutte.Http3.NotifyEcho do
   end
 end
 
+# datagram をわざと遅く捌く（有界 drop の検証用）。
+defmodule Karutte.Http3.SlowDatagram do
+  @behaviour Karutte.WebTransport
+  @impl true
+  def init(_arg, ci), do: {:ok, ci}
+  @impl true
+  def handle_stream(_s, _d, st), do: {{:handler, Karutte.Http3.Echo.Stream, nil}, st}
+  @impl true
+  def handle_datagram(_bin, st) do
+    Process.sleep(40)
+    {:ok, st}
+  end
+end
+
 defmodule Karutte.Http3.LoopbackTest do
   use ExUnit.Case
 
@@ -122,7 +136,106 @@ defmodule Karutte.Http3.LoopbackTest do
     :quicer.shutdown_connection(conn)
   end
 
+  test "telemetry: セッション open のイベントが飛ぶ", %{port: port} do
+    ref = attach_telemetry([:session, :open])
+    conn = connect(port)
+    open_session(conn)
+    assert_receive {:telem, ^ref, _measure, %{session_id: _}}, @recv_timeout
+    :quicer.shutdown_connection(conn)
+  end
+
+  test "datagram の過負荷は drop する（有界キュー、telemetry で観測）" do
+    tmp = Path.join(System.tmp_dir!(), "karutte_h3d_#{System.unique_integer([:positive])}")
+    {:ok, cert} = Karutte.Http3.Cert.generate(tmp)
+    port = 14_435
+
+    start_supervised!(
+      {Karutte.Http3.Server,
+       port: port,
+       certfile: cert.certfile,
+       keyfile: cert.keyfile,
+       handler: Karutte.Http3.SlowDatagram,
+       acceptors: 1,
+       max_datagram_queue: 2,
+       name: Karutte.Http3.Server.DropT}
+    )
+
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    ref = attach_telemetry([:datagram, :dropped])
+    conn = connect(port)
+    {sid, _} = open_session(conn)
+
+    # 遅いハンドラ（40ms/件）に一気に流し込む → メールボックスが上限を超えて drop。
+    for _ <- 1..40 do
+      :quicer.send_dgram(conn, :erlang.iolist_to_binary(:cow_http3.datagram(sid, "d")))
+    end
+
+    assert_receive {:telem, ^ref, _measure, %{session_id: _}}, @recv_timeout
+    :quicer.shutdown_connection(conn)
+  end
+
+  test "graceful drain: セッションに DRAIN capsule が届く" do
+    tmp = Path.join(System.tmp_dir!(), "karutte_h3g_#{System.unique_integer([:positive])}")
+    {:ok, cert} = Karutte.Http3.Cert.generate(tmp)
+    port = 14_436
+
+    start_supervised!(
+      {Karutte.Http3.Server,
+       port: port,
+       certfile: cert.certfile,
+       keyfile: cert.keyfile,
+       handler: Karutte.Http3.Echo,
+       acceptors: 1,
+       name: Karutte.Http3.Server.DrainT}
+    )
+
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    conn = connect(port)
+    {_sid, req} = open_session(conn)
+
+    # 別プロセスで graceful drain（猶予中に DRAIN が届くはず）。
+    spawn(fn -> Karutte.Http3.Server.drain(Karutte.Http3.Server.DrainT, 800) end)
+
+    assert :wt_drain_session == recv_capsule(req)
+  end
+
   # ================= クライアント・ヘルパ =================
+
+  defp recv_capsule(stream, buf \\ <<>>) do
+    case :cow_capsule.parse(buf) do
+      {:ok, cap, _rest} when is_atom(cap) or is_tuple(cap) ->
+        cap
+
+      {:ok, rest} when is_binary(rest) ->
+        recv_capsule(stream, rest)
+
+      _ ->
+        receive do
+          {:quic, bin, ^stream, _} when is_binary(bin) -> recv_capsule(stream, buf <> bin)
+          {:quic, _o, _, _} -> recv_capsule(stream, buf)
+        after
+          @recv_timeout -> flunk("DRAIN capsule を受け取れなかった")
+        end
+    end
+  end
+
+  defp attach_telemetry(event) do
+    ref = make_ref()
+    id = {__MODULE__, ref}
+    test = self()
+
+    :telemetry.attach(
+      id,
+      [:karutte, :http3 | event],
+      fn _e, measure, meta, _ -> Kernel.send(test, {:telem, ref, measure, meta}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(id) end)
+    ref
+  end
 
   # 接続して H3 を立ち上げる（control/encoder/decoder + SETTINGS）。conn を返す。
   defp connect(port) do

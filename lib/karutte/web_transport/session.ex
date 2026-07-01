@@ -25,6 +25,9 @@ defmodule Karutte.WebTransport.Session do
 
   alias Karutte.{Inline, WebTransport.StreamServer}
 
+  # ストリームハンドラがクラッシュしたときに相手へ返す WT アプリエラーコード。
+  @stream_crash_code 0
+
   @typep st :: %{
            transport: module(),
            conn: term(),
@@ -46,6 +49,9 @@ defmodule Karutte.WebTransport.Session do
 
   @impl true
   def init(opts) do
+    # StreamServer を link で持つが、その事故を握る（＝一つのストリームハンドラが落ちても
+    # セッション全体を道連れにしない）ために exit を trap する。
+    Process.flag(:trap_exit, true)
     mod = Keyword.fetch!(opts, :handler)
     init_arg = Keyword.get(opts, :init_arg)
     conn_info = Keyword.get(opts, :conn_info, %{})
@@ -98,6 +104,25 @@ defmodule Karutte.WebTransport.Session do
 
   def handle_info({:quic, :closed, _conn, reason}, s) do
     {:stop, {:shutdown, reason}, s}
+  end
+
+  # EXIT の相手で分岐:
+  #   - StreamServer（子）が落ちた → 異常ならそのストリームだけ reset し、セッションは生かす。
+  #   - それ以外（親の Connection 等）が落ちた → セッションも畳む。
+  def handle_info({:EXIT, pid, reason}, s) do
+    case Enum.find(s.owners, fn {_stream, p} -> p == pid end) do
+      {stream, _} ->
+        case reason do
+          :normal -> :ok
+          {:shutdown, _} -> :ok
+          _ -> s.transport.shutdown(stream, {:reset, @stream_crash_code})
+        end
+
+        {:noreply, %{s | owners: Map.delete(s.owners, stream)}}
+
+      nil ->
+        {:stop, reason, s}
+    end
   end
 
   def handle_info(msg, s) do

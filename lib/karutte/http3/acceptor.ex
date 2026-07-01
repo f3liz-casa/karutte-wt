@@ -29,7 +29,8 @@ defmodule Karutte.Http3.Acceptor do
       conn_sup: Keyword.fetch!(opts, :conn_sup),
       handler: Keyword.fetch!(opts, :handler),
       handler_arg: Keyword.get(opts, :handler_arg),
-      max_sessions: Keyword.get(opts, :max_sessions, 16)
+      max_sessions: Keyword.get(opts, :max_sessions, 16),
+      max_datagram_queue: Keyword.get(opts, :max_datagram_queue, 1_000)
     }
 
     {:ok, state, {:continue, :accept}}
@@ -48,14 +49,25 @@ defmodule Karutte.Http3.Acceptor do
   end
 
   defp spawn_connection(conn, s) do
-    case DynamicSupervisor.start_child(
-           s.conn_sup,
-           {Connection,
-            [qconn: conn, handler: s.handler, handler_arg: s.handler_arg, max_sessions: s.max_sessions]}
-         ) do
+    child =
+      {Connection,
+       [
+         qconn: conn,
+         handler: s.handler,
+         handler_arg: s.handler_arg,
+         max_sessions: s.max_sessions,
+         max_datagram_queue: s.max_datagram_queue
+       ]}
+
+    case DynamicSupervisor.start_child(s.conn_sup, child) do
       {:ok, pid} ->
         :quicer.controlling_process(conn, pid)
         Connection.setup(pid)
+
+      {:error, :max_children} ->
+        # 同時接続の上限。静かに断る（接続を閉じる）。
+        :telemetry.execute([:karutte, :http3, :connection, :rejected], %{count: 1}, %{reason: :max_children})
+        :quicer.async_shutdown_connection(conn, 0, 0)
 
       {:error, reason} ->
         Logger.warning("Connection 起動失敗: #{inspect(reason)}")

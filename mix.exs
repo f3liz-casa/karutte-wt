@@ -26,6 +26,8 @@ defmodule Karutte.MixProject do
       # karutte-wt 側は WebTransport 固有の部分（Extended CONNECT / WT framing / datagram /
       # runner 配線）だけを書く。
       {:cowlib, "~> 2.17"},
+      # 観測（接続/セッション/datagram drop 等のイベント）。
+      {:telemetry, "~> 1.2"},
       # L2 の縫い目。Plug.Conn.upgrade_adapter/3（WebSock と同じ脱出口）に乗るため。
       {:plug, "~> 1.16"}
     ]

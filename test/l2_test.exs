@@ -41,6 +41,24 @@ defmodule L2RecordingTransport do
   end
 end
 
+# --- L4: handle_in で必ずクラッシュする（隔離の検証用） ---
+defmodule L2CrashStream do
+  @behaviour Karutte.WebTransport.Stream
+  @impl true
+  def init(_stream, _arg), do: {:ok, %{}, active: true}
+  @impl true
+  def handle_in(_bin, _state), do: raise("boom")
+end
+
+# --- L3: どのストリームも L2CrashStream に手渡す ---
+defmodule L2CrashSession do
+  @behaviour Karutte.WebTransport
+  @impl true
+  def init(obs, _info), do: {:ok, obs}
+  @impl true
+  def handle_stream(_stream, _dir, obs), do: {{:handler, L2CrashStream, nil}, obs}
+end
+
 # --- L4: 受けたバイトをそのまま echo、FIN で書き側を閉じる ---
 defmodule L2EchoStream do
   @behaviour Karutte.WebTransport.Stream
@@ -169,6 +187,24 @@ defmodule Karutte.L2Test do
 
     Kernel.send(sess, {:quic, :new_stream, {:c, obs}, stream, :bidi})
     assert_receive {:shutdown, ^stream, {:reset, 7}}
+  end
+
+  test "ストリームハンドラのクラッシュはそのストリームだけ reset、セッションは生きる" do
+    {sess, obs} = start_session(L2CrashSession)
+    stream = {:s, obs, 1}
+
+    Kernel.send(sess, {:quic, :new_stream, {:c, obs}, stream, :bidi})
+    assert_receive {:control, ^stream, pid}
+
+    # live data → handle_in が raise → StreamServer crash → Session がそのストリームを reset
+    Kernel.send(pid, {:quic, :data, stream, "x", fin: false})
+    assert_receive {:shutdown, ^stream, {:reset, 0}}
+
+    # セッションは生きていて、別のストリームをまだ受けられる
+    stream2 = {:s, obs, 5}
+    Kernel.send(sess, {:quic, :new_stream, {:c, obs}, stream2, :bidi})
+    assert_receive {:control, ^stream2, _pid2}
+    assert Process.alive?(sess)
   end
 
   test "datagram は制御面の handle_datagram へ（軸の外）" do

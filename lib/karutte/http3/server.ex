@@ -20,8 +20,14 @@ defmodule Karutte.Http3.Server do
     * `:acceptors`   — 同時 accept 数（既定 4）
     * `:name`        — このサーバの登録名のベース（既定 `Karutte.Http3.Server`）
     * `:max_sessions`           — 1 接続あたりの WT セッション上限（既定 16）
+    * `:max_connections`        — 同時接続の上限（既定 10_000。超えたら新規は断る）
+    * `:max_datagram_queue`     — セッションの datagram 滞留の上限（既定 1_000。超えたら drop）
     * `:idle_timeout_ms`        — 既定 30_000
     * `:peer_bidi_stream_count` / `:peer_unidi_stream_count` — 既定 256
+
+  観測（telemetry）: `[:karutte, :http3, :connection, :start | :stop]`,
+  `[:karutte, :http3, :session, :open | :close]`, `[:karutte, :http3, :datagram, :dropped]`,
+  `[:karutte, :http3, :connection, :rejected]`。
 
   例:
 
@@ -46,6 +52,34 @@ defmodule Karutte.Http3.Server do
     }
   end
 
+  @doc """
+  graceful shutdown（ローリング再起動向け）。
+
+    1. acceptor を止めて新規接続を受けない
+    2. 生きている各接続に GOAWAY ＋ 各 WT セッションへ DRAIN を配る（クライアントに移行を促す）
+    3. `grace_ms` 待つ
+    4. ツリーごと停止
+
+  ブロックする。別プロセスで呼ぶか、deploy スクリプトから。
+  """
+  @spec drain(atom(), non_neg_integer()) :: :ok
+  def drain(name \\ __MODULE__, grace_ms \\ 5_000) do
+    for {id, pid, _, _} <- Supervisor.which_children(name),
+        match?({Karutte.Http3.Acceptor, _}, id),
+        is_pid(pid) do
+      Supervisor.terminate_child(name, id)
+    end
+
+    conn_sup = Module.concat(name, "ConnectionSup")
+
+    for {_, pid, _, _} <- DynamicSupervisor.which_children(conn_sup), is_pid(pid) do
+      Karutte.Http3.Connection.drain(pid)
+    end
+
+    Process.sleep(grace_ms)
+    Supervisor.stop(name)
+  end
+
   @impl true
   def init(opts) do
     name = Keyword.get(opts, :name, __MODULE__)
@@ -55,7 +89,8 @@ defmodule Karutte.Http3.Server do
     config = %{
       handler: Keyword.fetch!(opts, :handler),
       handler_arg: Keyword.get(opts, :handler_arg),
-      max_sessions: Keyword.get(opts, :max_sessions, 16)
+      max_sessions: Keyword.get(opts, :max_sessions, 16),
+      max_datagram_queue: Keyword.get(opts, :max_datagram_queue, 1_000)
     }
 
     n = Keyword.get(opts, :acceptors, 4)
@@ -74,14 +109,18 @@ defmodule Karutte.Http3.Server do
            conn_sup: conn_sup,
            handler: config.handler,
            handler_arg: config.handler_arg,
-           max_sessions: config.max_sessions
+           max_sessions: config.max_sessions,
+           max_datagram_queue: config.max_datagram_queue
          ]}
       end
 
     children =
       [
         {Karutte.Http3.Listener, listener_opts},
-        {DynamicSupervisor, name: conn_sup, strategy: :one_for_one}
+        {DynamicSupervisor,
+         name: conn_sup,
+         strategy: :one_for_one,
+         max_children: Keyword.get(opts, :max_connections, 10_000)}
       ] ++ acceptors
 
     Supervisor.init(children, strategy: :rest_for_one)

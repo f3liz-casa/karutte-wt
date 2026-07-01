@@ -40,6 +40,7 @@ defmodule Karutte.Http3.Connection do
     :enc_qs,
     :dec_qs,
     max_sessions: 16,
+    max_datagram_queue: 1_000,
     sessions: %{},
     sess_qs: %{},
     ids: %{},
@@ -63,6 +64,9 @@ defmodule Karutte.Http3.Connection do
   @doc "acceptor が accept+handshake 済みの接続を controlling_process で移したあと、これを呼ぶ。"
   def setup(pid), do: GenServer.cast(pid, :setup)
 
+  @doc "graceful shutdown: H3 GOAWAY を送り、各 WT セッションに DRAIN capsule を配る。"
+  def drain(pid), do: GenServer.cast(pid, :drain)
+
   @impl true
   def init(opts) do
     Process.flag(:trap_exit, true)
@@ -72,13 +76,37 @@ defmodule Karutte.Http3.Connection do
        qconn: Keyword.fetch!(opts, :qconn),
        handler: Keyword.fetch!(opts, :handler),
        handler_arg: Keyword.get(opts, :handler_arg),
-       max_sessions: Keyword.get(opts, :max_sessions, 16)
+       max_sessions: Keyword.get(opts, :max_sessions, 16),
+       max_datagram_queue: Keyword.get(opts, :max_datagram_queue, 1_000)
      }}
   end
 
   # 所有を得たので H3 を立ち上げる（接続は acceptor で handshake 済み）。
   @impl true
   def handle_cast(:setup, s), do: {:noreply, do_setup(s)}
+
+  # graceful shutdown。新規は受けない合図（GOAWAY）＋各セッションに DRAIN を送る。
+  # 実際に閉じるのは呼び手（Server.drain）が猶予のあとで。
+  def handle_cast(:drain, %{machine: nil} = s), do: {:noreply, s}
+
+  def handle_cast(:drain, s) do
+    if s.ctrl_qs, do: :quicer.send(s.ctrl_qs, goaway_frame(s))
+
+    for {_sid, qs} <- s.sess_qs do
+      :quicer.send(qs, :cow_capsule.wt_drain_session())
+    end
+
+    telem([:connection, :drain], %{sessions: map_size(s.sessions)})
+    {:noreply, s}
+  end
+
+  # GOAWAY フレーム（type 0x07 + 長さ + StreamID varint）。id は「これ以降は処理しない」の境目。
+  # 現在のセッション id の最大 + 4（次に来る bidi）を渡して、進行中は生かし新規は断る。
+  defp goaway_frame(s) do
+    last = Enum.max([0 | Map.keys(s.sessions)]) + 4
+    payload = :cow_http3.encode_int(last)
+    [<<0x07>>, :cow_http3.encode_int(:erlang.iolist_size(payload)), payload]
+  end
 
   # --- H3 立ち上げ ---
 
@@ -112,6 +140,7 @@ defmodule Karutte.Http3.Connection do
 
     # 以後 peer が開くストリームを受け取り続ける。
     arm_accept(s.qconn)
+    telem([:connection, :start], %{})
 
     s =
       %{s | machine: machine, ctrl_qs: ctrl, enc_qs: enc, dec_qs: dec}
@@ -231,8 +260,9 @@ defmodule Karutte.Http3.Connection do
   end
 
   @impl true
-  def terminate(_reason, %{qconn: qconn}) when qconn != nil do
+  def terminate(_reason, %{qconn: qconn} = s) when qconn != nil do
     # セッション runner は link で連れて落ちる。QUIC 接続だけ明示的に閉じる。
+    telem([:connection, :stop], %{sessions: map_size(s.sessions)})
     :quicer.async_shutdown_connection(qconn, 0, 0)
     :ok
   end
@@ -446,6 +476,8 @@ defmodule Karutte.Http3.Connection do
         conn_info: %{transport: @transport, conn: conn}
       )
 
+    telem([:session, :open], %{session_id: id})
+
     %{s | machine: machine, sessions: Map.put(s.sessions, id, pid), sess_qs: Map.put(s.sess_qs, id, qs)}
     |> put_kind(qs, :session)
   end
@@ -601,6 +633,8 @@ defmodule Karutte.Http3.Connection do
   # cow_http3_machine.close_webtransport_session は二重呼びで例外なので一度だけ。
   defp forget_session(s, session_id) do
     if Map.has_key?(s.sessions, session_id) do
+      telem([:session, :close], %{session_id: session_id})
+
       machine =
         if s.machine, do: :cow_http3_machine.close_webtransport_session(session_id, s.machine), else: s.machine
 
@@ -617,16 +651,34 @@ defmodule Karutte.Http3.Connection do
 
   # ================= datagram =================
 
+  # datagram は軸の外（RFC 9221）＝フロー制御なし。過負荷なら drop、決してブロックしない。
+  # セッション runner のメールボックスが上限を超えていたら落とす（有界キュー→drop）。
   defp on_datagram(bin, s) do
     {session_id, payload} = :cow_http3.parse_datagram(bin)
 
     case Map.get(s.sessions, session_id) do
-      nil -> :ok
-      pid -> Kernel.send(pid, {:quic, :datagram, {:h3c, self(), s.qconn, session_id}, payload})
-    end
+      nil ->
+        s
 
-    s
+      pid ->
+        if overloaded?(pid, s.max_datagram_queue) do
+          telem([:datagram, :dropped], %{session_id: session_id})
+        else
+          Kernel.send(pid, {:quic, :datagram, {:h3c, self(), s.qconn, session_id}, payload})
+        end
+
+        s
+    end
   end
+
+  defp overloaded?(pid, max) do
+    case Process.info(pid, :message_queue_len) do
+      {:message_queue_len, n} -> n > max
+      nil -> true
+    end
+  end
+
+  defp telem(event, meta), do: :telemetry.execute([:karutte, :http3 | event], %{count: 1}, meta)
 
   # ================= 小道具 =================
 
