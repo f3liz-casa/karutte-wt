@@ -43,6 +43,7 @@ defmodule Karutte.Http3.Connection do
     max_datagram_queue: 1_000,
     sessions: %{},
     sess_qs: %{},
+    draining: MapSet.new(),
     ids: %{},
     kinds: %{},
     bufs: %{},
@@ -97,7 +98,8 @@ defmodule Karutte.Http3.Connection do
     end
 
     telem([:connection, :drain], %{sessions: map_size(s.sessions)})
-    {:noreply, s}
+    # 以後、これらのセッションでは新規ストリームを受けない（進行中は生かす）。
+    {:noreply, %{s | draining: MapSet.union(s.draining, MapSet.new(Map.keys(s.sessions)))}}
   end
 
   # GOAWAY フレーム（type 0x07 + 長さ + StreamID varint）。id は「これ以降は処理しない」の境目。
@@ -519,6 +521,17 @@ defmodule Karutte.Http3.Connection do
   # ================= WebTransport ストリーム =================
 
   defp start_wt_stream(s, qs, session_id, dir) do
+    if MapSet.member?(s.draining, session_id) do
+      # ドレイン中のセッションでは新規ストリームを断る（両方向 reset）。
+      :quicer.async_shutdown_stream(qs, @shutdown_abort_send + @shutdown_abort_receive, 0)
+      telem([:stream, :refused], %{session_id: session_id})
+      drop_stream(s, qs)
+    else
+      accept_wt_stream(s, qs, session_id, dir)
+    end
+  end
+
+  defp accept_wt_stream(s, qs, session_id, dir) do
     {:ok, machine} = :cow_http3_machine.become_webtransport_stream(sid(qs), session_id, s.machine)
 
     s =
@@ -585,9 +598,9 @@ defmodule Karutte.Http3.Connection do
         close_session(clear_buf(s, qs), sid)
 
       {:ok, :wt_drain_session, rest} ->
-        # ドレイン要求。今は記録だけ（新規ストリームを止める本格対応は後）。
-        Logger.debug("WT drain session #{sid}")
-        parse_capsules(s, qs, sid, rest)
+        # peer からのドレイン要求。このセッションは新規ストリームを受けない（進行中は生かす）。
+        telem([:session, :drain], %{session_id: sid})
+        parse_capsules(%{s | draining: MapSet.put(s.draining, sid)}, qs, sid, rest)
 
       {:ok, rest} ->
         # 知らない capsule は飛ばして続ける。
@@ -642,7 +655,8 @@ defmodule Karutte.Http3.Connection do
         s
         | machine: machine,
           sessions: Map.delete(s.sessions, session_id),
-          sess_qs: Map.delete(s.sess_qs, session_id)
+          sess_qs: Map.delete(s.sess_qs, session_id),
+          draining: MapSet.delete(s.draining, session_id)
       }
     else
       s

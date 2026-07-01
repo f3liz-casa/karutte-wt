@@ -201,6 +201,44 @@ defmodule Karutte.Http3.LoopbackTest do
     assert :wt_drain_session == recv_capsule(req)
   end
 
+  test "peer からの DRAIN 後は、そのセッションの新規ストリームが reset される" do
+    tmp = Path.join(System.tmp_dir!(), "karutte_h3e_#{System.unique_integer([:positive])}")
+    {:ok, cert} = Karutte.Http3.Cert.generate(tmp)
+    port = 14_437
+
+    start_supervised!(
+      {Karutte.Http3.Server,
+       port: port,
+       certfile: cert.certfile,
+       keyfile: cert.keyfile,
+       handler: Karutte.Http3.Echo,
+       acceptors: 1,
+       name: Karutte.Http3.Server.DrainEnforceT}
+    )
+
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    conn = connect(port)
+    {sid, req} = open_session(conn)
+
+    # DRAIN の前は echo が通る。
+    assert "ok" == wt_bidi_echo(conn, sid, "ok")
+
+    # クライアントから DRAIN を送る → サーバはこのセッションを draining に。
+    :quicer.send(req, :cow_capsule.wt_drain_session())
+    Process.sleep(200)
+
+    # 以後の新規 WT ストリームは reset される（echo されない）。
+    {:ok, wt} = :quicer.start_stream(conn, %{open_flag: 0, active: true})
+    :quicer.send(wt, [:cow_http3.webtransport_stream_header(sid, :bidi), "no"])
+
+    assert_receive {:quic, kind, ^wt, _}
+                   when kind in [:peer_send_aborted, :peer_receive_aborted, :stream_closed],
+                   @recv_timeout
+
+    :quicer.shutdown_connection(conn)
+  end
+
   # ================= クライアント・ヘルパ =================
 
   defp recv_capsule(stream, buf \\ <<>>) do

@@ -86,7 +86,8 @@ HTTP/3 サーバ機構（`Karutte.Http3.*`）— 監視ツリーひと組:
   datagram dropped, connection rejected）。
 - **graceful shutdown**: `Karutte.Http3.Server.drain(name, grace_ms)` で、acceptor を止め（新規を受けない）、
   各接続に H3 GOAWAY ＋各 WT セッションへ DRAIN capsule を配り、猶予のあとツリーごと停止。
-  ローリング再起動でクライアントを穏やかに移す。
+  ローリング再起動でクライアントを穏やかに移す。**ドレイン中のセッションは新規ストリームを reset で断る**
+  （server 発の drain / peer からの inbound DRAIN capsule、どちらでも）。進行中のストリームは生かす。
 
 補助:
 
@@ -112,7 +113,7 @@ QUIC のフロー制御は三つあって、それぞれ別の場所に、同じ
 
 ## 確かめてあること
 
-`mix test` が緑（46 passed）。**実 QUIC で end-to-end が通っている**:
+`mix test` が緑（47 passed）。**実 QUIC で end-to-end が通っている**:
 
 - `test/http3_loopback_test.exs` — 最小 Elixir クライアント↔ H3 WebTransport サーバを実 quicer で繋ぐ:
   - connect → H3 SETTINGS → Extended CONNECT(webtransport) → 200 → WT 双方向ストリーム echo → datagram echo
@@ -124,6 +125,7 @@ QUIC のフロー制御は三つあって、それぞれ別の場所に、同じ
   - **telemetry イベント**（セッション open が飛ぶ）
   - **ストリームハンドラのクラッシュ隔離**（`l2_test.exs`: handle_in が raise → そのストリームだけ reset、セッションは生存）
   - **graceful drain**（`Server.drain` でセッションに DRAIN capsule が届く）
+  - **DRAIN 後の新規ストリーム拒否**（peer から DRAIN → 以後の WT ストリームは reset される）
 
 そして **本物のブラウザ（Chrome 149）でも確認済み**: 自己署名証明書を `serverCertificateHashes`
 でピン留めして `new WebTransport("https://localhost:4433/")`、双方向ストリーム echo（"hi"→"hi"）と
@@ -146,7 +148,7 @@ behaviour 群はコンパイルが通り、跨りの型（`QuicTransport.stream(
 
 ## まだやっていないこと（正直に）
 
-- **DRAIN capsule は記録のみ**（新規ストリーム抑制までは未）。CONNECT 以外は 404。
+- **CONNECT 以外のリクエストは 404**（WebTransport 専用）。
 - **L2 の Plug 縫い目（`Karutte.WebTransportAdapter`）は別経路。** これは Bandit に WebTransport を
   載せる将来用の形で、いまの HTTP/3 サーバ（`Karutte.Http3.*`）は Bandit を介さず quicer に直に立つ。
 - **HTTP/2 の床はブラウザ非対応のフォールバック。** datagram は擬似（信頼・順序つき）になる。
