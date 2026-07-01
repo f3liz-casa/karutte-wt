@@ -22,6 +22,25 @@ defmodule Karutte.Http3.NotifyEcho do
   end
 end
 
+# demand を一度に一束（active: :once）にする echo。背圧ループ（再 arm）を volume 下で試す用。
+defmodule Karutte.Http3.DemandEcho do
+  @behaviour Karutte.WebTransport
+  @impl true
+  def init(_arg, ci), do: {:ok, ci}
+  @impl true
+  def handle_stream(_s, _d, st), do: {{:handler, __MODULE__.Stream, nil}, st}
+
+  defmodule Stream do
+    @behaviour Karutte.WebTransport.Stream
+    @impl true
+    def init(_stream, _arg), do: {:ok, %{}, active: :once}
+    @impl true
+    def handle_in(bin, st), do: {:push, bin, st, active: :once}
+    @impl true
+    def handle_fin(st), do: {:close_write, st}
+  end
+end
+
 # datagram をわざと遅く捌く（有界 drop の検証用）。
 defmodule Karutte.Http3.SlowDatagram do
   @behaviour Karutte.WebTransport
@@ -84,6 +103,49 @@ defmodule Karutte.Http3.LoopbackTest do
     :quicer.send_dgram(conn, :erlang.iolist_to_binary(:cow_http3.datagram(session_id, "ping")))
     assert "ping" == recv_datagram(conn, session_id)
 
+    :quicer.shutdown_connection(conn)
+  end
+
+  test "大きなペイロードもストリームで正しく往復する（多フレーム跨ぎ）", %{port: port} do
+    conn = connect(port)
+    {sid, _} = open_session(conn)
+
+    payload = :crypto.strong_rand_bytes(64 * 1024)
+    {:ok, wt} = :quicer.start_stream(conn, %{open_flag: 0, active: true})
+    :quicer.send(wt, [:cow_http3.webtransport_stream_header(sid, :bidi), payload])
+
+    got = recv_raw(wt, byte_size(payload))
+    assert byte_size(got) == byte_size(payload)
+    assert got == payload
+
+    :quicer.shutdown_connection(conn)
+  end
+
+  test "demand 駆動（active: :once）でも大きなペイロードが取りこぼしなく往復する" do
+    tmp = Path.join(System.tmp_dir!(), "karutte_h3dm_#{System.unique_integer([:positive])}")
+    {:ok, cert} = Karutte.Http3.Cert.generate(tmp)
+    port = 14_439
+
+    start_supervised!(
+      {Karutte.Http3.Server,
+       port: port,
+       certfile: cert.certfile,
+       keyfile: cert.keyfile,
+       handler: Karutte.Http3.DemandEcho,
+       acceptors: 1,
+       name: Karutte.Http3.Server.DemandT}
+    )
+
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    conn = connect(port)
+    {sid, _} = open_session(conn)
+
+    payload = :crypto.strong_rand_bytes(32 * 1024)
+    {:ok, wt} = :quicer.start_stream(conn, %{open_flag: 0, active: true})
+    :quicer.send(wt, [:cow_http3.webtransport_stream_header(sid, :bidi), payload])
+
+    assert payload == recv_raw(wt, byte_size(payload))
     :quicer.shutdown_connection(conn)
   end
 

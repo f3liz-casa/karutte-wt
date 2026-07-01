@@ -116,7 +116,7 @@ QUIC のフロー制御は三つあって、それぞれ別の場所に、同じ
 
 ## 確かめてあること
 
-`mix test` が緑（48 passed）。**実 QUIC で end-to-end が通っている**:
+`mix test` が緑（50 passed）。**実 QUIC で end-to-end が通っている**:
 
 - `test/http3_loopback_test.exs` — 最小 Elixir クライアント↔ H3 WebTransport サーバを実 quicer で繋ぐ:
   - connect → H3 SETTINGS → Extended CONNECT(webtransport) → 200 → WT 双方向ストリーム echo → datagram echo
@@ -130,6 +130,8 @@ QUIC のフロー制御は三つあって、それぞれ別の場所に、同じ
   - **graceful drain**（`Server.drain` でセッションに DRAIN capsule が届く）
   - **DRAIN 後の新規ストリーム拒否**（peer から DRAIN → 以後の WT ストリームは reset される）
   - **authorize/1 での認証**（path が "/ok" は 200、それ以外は 403）
+  - **大きなペイロード（64KB）が多フレーム跨ぎで整合したまま往復**
+  - **demand 駆動（active: :once）でも 32KB が取りこぼしなく往復**（背圧ループの volume 検証）
 
 そして **本物のブラウザ（Chrome 149）でも確認済み**: 自己署名証明書を `serverCertificateHashes`
 でピン留めして `new WebTransport("https://localhost:4433/")`、双方向ストリーム echo（"hi"→"hi"）と
