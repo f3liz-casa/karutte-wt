@@ -29,8 +29,11 @@ defmodule WtRelay.MixProject do
 
   defp deps do
     [
-      # telemetry イベントだけ。PromEx への配線は origin(karutte) と束ねる段で足す。
-      {:telemetry, "~> 1.2"}
+      # telemetry イベント。
+      {:telemetry, "~> 1.2"},
+      # snapshot を NATS(`wt_relay.telemetry`)へ push して sukhi の admin に見せる用
+      # （sukhi と同じ Gnat）。NATS 未設定なら接続しない＝観測は NATS 非依存のまま。
+      {:gnat, "~> 1.9"}
     ]
   end
 end
