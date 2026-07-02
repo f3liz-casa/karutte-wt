@@ -29,7 +29,9 @@ defmodule Karutte.MixProject do
       # 観測（接続/セッション/datagram drop 等のイベント）。
       {:telemetry, "~> 1.2"},
       # L2 の縫い目。Plug.Conn.upgrade_adapter/3（WebSock と同じ脱出口）に乗るため。
-      {:plug, "~> 1.16"}
+      {:plug, "~> 1.16"},
+      # sukhi の出す event を受ける NATS クライアント（sukhi と同じ Gnat）。
+      {:gnat, "~> 1.9"}
     ]
   end
 end
