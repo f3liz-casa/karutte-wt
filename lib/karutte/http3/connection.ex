@@ -521,12 +521,17 @@ defmodule Karutte.Http3.Connection do
     id = sid(qs)
     conn = {:h3c, self(), s.qconn, id}
 
+    peer = peer_addr(s.qconn)
+
     conn_info = %{
       transport: @transport,
       conn: conn,
       path: pseudo[:path],
       authority: pseudo[:authority],
-      headers: headers
+      headers: headers,
+      # QUIC peer アドレス。透過(A)モードの wt-relay 裏では、これが実クライアント IP。
+      # authorize/1・レート制限・ログ・telemetry 相関に使える。SNAT モードでは relay の WG:port。
+      peer: peer
     }
 
     case authorize(s.handler, conn_info) do
@@ -543,7 +548,7 @@ defmodule Karutte.Http3.Connection do
         # 200 は stream がまだ bidi のうちに返す（そのあと wt_session 化する）。
         s = respond(s, qs, 200, false)
         machine = :cow_http3_machine.become_webtransport_session(id, s.machine)
-        telem([:session, :open], %{session_id: id, path: pseudo[:path]})
+        telem([:session, :open], %{session_id: id, path: pseudo[:path], peer: peer})
         # セッションが立った合図。ここから先はハンドラが server 発ストリームを開ける。
         Kernel.send(pid, :wt_ready)
 
@@ -784,6 +789,14 @@ defmodule Karutte.Http3.Connection do
   defp sid(qs) do
     {:ok, id} = :quicer.get_stream_id(qs)
     id
+  end
+
+  # QUIC 接続の peer アドレス（{ip, port}）。取れなければ nil。
+  defp peer_addr(qconn) do
+    case :quicer.peername(qconn) do
+      {:ok, addr} -> addr
+      _ -> nil
+    end
   end
 
   defp h3s(_s, qs), do: {:h3s, self(), qs}

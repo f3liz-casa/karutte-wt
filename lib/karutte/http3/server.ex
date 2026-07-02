@@ -24,6 +24,9 @@ defmodule Karutte.Http3.Server do
     * `:max_datagram_queue`     — セッションの datagram 滞留の上限（既定 1_000。超えたら drop）
     * `:idle_timeout_ms`        — 既定 30_000
     * `:peer_bidi_stream_count` / `:peer_unidi_stream_count` — 既定 256
+    * `:bind`                   — 待ち受けアドレス（例 "10.9.0.2"。省略時は全 IF）。
+                                  wt-relay の裏で WG だけで待つとき用。
+    * `:keep_alive_interval_ms` — server 発 QUIC keepalive の間隔（NAT/relay の conntrack 温存）
 
   観測（telemetry）: `[:karutte, :http3, :connection, :start | :stop]`,
   `[:karutte, :http3, :session, :open | :close]`, `[:karutte, :http3, :datagram, :dropped]`,
@@ -97,7 +100,17 @@ defmodule Karutte.Http3.Server do
 
     listener_opts =
       opts
-      |> Keyword.take([:port, :certfile, :keyfile, :alpn, :idle_timeout_ms, :peer_bidi_stream_count, :peer_unidi_stream_count])
+      |> Keyword.take([
+        :port,
+        :certfile,
+        :keyfile,
+        :alpn,
+        :idle_timeout_ms,
+        :peer_bidi_stream_count,
+        :peer_unidi_stream_count,
+        :bind,
+        :keep_alive_interval_ms
+      ])
       |> Keyword.put(:name, listener_name)
 
     acceptors =

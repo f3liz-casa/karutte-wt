@@ -39,20 +39,35 @@ defmodule Karutte.Http3.Pusher do
   def handle_info(_msg, st), do: {:ok, st}
 end
 
-# セッションが立ったら server 発の双方向ストリームを echo runner 付きで開く（server bidi の検証用）。
+# init で受け取った conn_info.peer を test pid へ報せる（peer 伝播の検証用）。
+defmodule Karutte.Http3.PeerReport do
+  @behaviour Karutte.WebTransport
+  @impl true
+  def init(test_pid, ci) do
+    Kernel.send(test_pid, {:peer, ci.peer})
+    {:ok, ci}
+  end
+
+  @impl true
+  def handle_stream(_s, _d, st), do: {{:reset, 0}, st}
+end
+
+# client からの datagram を合図に、server 発の双方向ストリームを echo runner 付きで開く。
+# （:wt_ready で即開くと new_stream が client の open_session に食われるレースになるので、
+#   検証は client 動作のあとに来る datagram で駆動して決定的にする。一度だけ開く。）
 defmodule Karutte.Http3.BidiPusher do
   @behaviour Karutte.WebTransport
   @impl true
-  def init(_arg, ci), do: {:ok, ci}
+  def init(_arg, ci), do: {:ok, Map.put(ci, :opened, false)}
   @impl true
   def handle_stream(_s, _d, st), do: {{:reset, 0}, st}
   @impl true
-  def handle_info(:wt_ready, st) do
+  def handle_datagram(_bin, %{opened: false} = st) do
     {:ok, _stream} = st.transport.open_stream(st.conn, :bidi, handler: Karutte.Http3.Echo.Stream)
-    {:ok, st}
+    {:ok, %{st | opened: true}}
   end
 
-  def handle_info(_msg, st), do: {:ok, st}
+  def handle_datagram(_bin, st), do: {:ok, st}
 end
 
 # demand を一度に一束（active: :once）にする echo。背圧ループ（再 arm）を volume 下で試す用。
@@ -471,11 +486,97 @@ defmodule Karutte.Http3.LoopbackTest do
     conn = connect(port)
     {sid, _} = open_session(conn)
 
+    # datagram を合図に server が bidi を開く（open_session 完了後なのでレースしない）。
+    :quicer.send_dgram(conn, :erlang.iolist_to_binary(:cow_http3.datagram(sid, "go")))
+
     # server が開いた bidi ストリームを受け取り、書いて echo を受ける。
     wt = recv_server_bidi(sid)
     :quicer.send(wt, "hey")
     assert "hey" == recv_raw(wt, 3)
 
+    :quicer.shutdown_connection(conn)
+  end
+
+  # ---- wt-relay 連携（透過モード）向けの karutte 側配線 ----
+
+  test "bind アドレス指定で、そのアドレスだけで待ち受ける（全 IF でなく特定 IP）" do
+    tmp = Path.join(System.tmp_dir!(), "karutte_h3bind_#{System.unique_integer([:positive])}")
+    {:ok, cert} = Karutte.Http3.Cert.generate(tmp)
+    port = 14_443
+
+    start_supervised!(
+      {Karutte.Http3.Server,
+       port: port,
+       bind: "127.0.0.1",
+       certfile: cert.certfile,
+       keyfile: cert.keyfile,
+       handler: Karutte.Http3.Echo,
+       acceptors: 1,
+       name: Karutte.Http3.Server.BindT}
+    )
+
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    # リスナが 0.0.0.0 でなく 127.0.0.1 に bind されていることを sockname で直に確認
+    # （実配備では WG アドレスに bind → eth0 直叩きに応えない）。
+    listener = Karutte.Http3.Listener.handle(Module.concat(Karutte.Http3.Server.BindT, "Listener"))
+    assert {:ok, {{127, 0, 0, 1}, ^port}} = :quicer.sockname(listener)
+  end
+
+  test "conn_info.peer に QUIC peer アドレスが渡る（透過モードでは実 IP）" do
+    tmp = Path.join(System.tmp_dir!(), "karutte_h3peer_#{System.unique_integer([:positive])}")
+    {:ok, cert} = Karutte.Http3.Cert.generate(tmp)
+    port = 14_444
+
+    start_supervised!(
+      {Karutte.Http3.Server,
+       port: port,
+       certfile: cert.certfile,
+       keyfile: cert.keyfile,
+       handler: Karutte.Http3.PeerReport,
+       handler_arg: self(),
+       acceptors: 1,
+       name: Karutte.Http3.Server.PeerT}
+    )
+
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    conn = connect(port)
+    _ = open_session(conn)
+
+    assert_receive {:peer, {ip, peer_port}}, @recv_timeout
+    assert is_tuple(ip)
+    assert is_integer(peer_port)
+    :quicer.shutdown_connection(conn)
+  end
+
+  test "keep_alive_interval_ms で idle_timeout を超えても接続が生きる" do
+    tmp = Path.join(System.tmp_dir!(), "karutte_h3ka_#{System.unique_integer([:positive])}")
+    {:ok, cert} = Karutte.Http3.Cert.generate(tmp)
+    port = 14_445
+
+    start_supervised!(
+      {Karutte.Http3.Server,
+       port: port,
+       certfile: cert.certfile,
+       keyfile: cert.keyfile,
+       handler: Karutte.Http3.Echo,
+       acceptors: 1,
+       idle_timeout_ms: 1_000,
+       keep_alive_interval_ms: 250,
+       name: Karutte.Http3.Server.KaT}
+    )
+
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    conn = connect(port)
+    {sid, _} = open_session(conn)
+    assert "a" == wt_bidi_echo(conn, sid, "a")
+
+    # idle_timeout(1s) を超えてアイドル。keepalive が無ければ切れる。
+    Process.sleep(1_800)
+
+    assert "b" == wt_bidi_echo(conn, sid, "b")
     :quicer.shutdown_connection(conn)
   end
 
