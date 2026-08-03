@@ -36,6 +36,8 @@ defmodule Karutte.BridgeTest do
     assert Bridge.subject_for("local", "42") == "stream.local"
     assert Bridge.subject_for("bubble", "42") == "stream.bubble"
     assert Bridge.subject_for("user", "42") == "stream.user.42"
+    assert Bridge.subject_for("direct", "42") == "stream.direct.42"
+    # 知らない feed は開かない ── これがあるので、sukhi 側だけ先に出せる。
     assert Bridge.subject_for("nope", "42") == nil
   end
 

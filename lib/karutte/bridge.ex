@@ -76,11 +76,19 @@ defmodule Karutte.Bridge do
   @impl true
   def terminate(_reason, _state), do: :ok
 
-  @doc "feed 名 → NATS subject。共有 feed は全員同じ、user だけ本人の sub 付き。"
+  @doc """
+  feed 名 → NATS subject。共有 feed は全員同じ、本人宛の feed だけ sub 付き。
+
+  知らない feed 名には nil を返す。`handle_info(:wt_ready, …)` の内包表記が
+  `subject = subject_for(…)` を**フィルタとして**使っているので、sukhi が
+  先に新しい feed を配りはじめても、ここが知らなければ**その feed が開かない
+  だけ** ── ほかの feed も接続も壊れない。同時デプロイの窓は要らない。
+  """
   @spec subject_for(String.t(), String.t()) :: String.t() | nil
   def subject_for("local", _sub), do: "stream.local"
   def subject_for("bubble", _sub), do: "stream.bubble"
   def subject_for("user", sub), do: "stream.user." <> sub
+  def subject_for("direct", sub), do: "stream.direct." <> sub
   def subject_for(_unknown, _sub), do: nil
 
   defp verify(path) when is_binary(path) do
