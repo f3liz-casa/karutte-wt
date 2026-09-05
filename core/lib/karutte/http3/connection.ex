@@ -520,8 +520,9 @@ defmodule Karutte.Http3.Connection do
     s
   end
 
-  # Put the request (path/authority/headers) to the handler's authorize/1 gate. On :ok, reply
-  # 200 and start the session. On {:reject, status}, refuse (authentication, routing).
+  # Pick the handler for this request (a fixed module, or a routing function of conn_info),
+  # then put the request to its authorize/1 gate. On :ok, reply 200 and start the session.
+  # On {:reject, status}, refuse (authentication, routing).
   defp accept_webtransport(s, qs, pseudo, headers) do
     id = sid(qs)
     conn = {:h3c, self(), s.qconn, id}
@@ -540,32 +541,44 @@ defmodule Karutte.Http3.Connection do
       peer: peer
     }
 
-    case authorize(s.handler, conn_info) do
-      :ok ->
-        {:ok, pid} =
-          Session.start_link(
-            transport: @transport,
-            conn: conn,
-            handler: s.handler,
-            init_arg: s.handler_arg,
-            conn_info: conn_info
-          )
+    with {:ok, handler, handler_arg} <- resolve_handler(s, conn_info),
+         :ok <- authorize(handler, conn_info) do
+      {:ok, pid} =
+        Session.start_link(
+          transport: @transport,
+          conn: conn,
+          handler: handler,
+          init_arg: handler_arg,
+          conn_info: conn_info
+        )
 
-        # Reply 200 while the stream is still a bidi (it becomes a wt_session right after).
-        s = respond(s, qs, 200, false)
-        machine = :cow_http3_machine.become_webtransport_session(id, s.machine)
-        telem([:session, :open], %{session_id: id, path: pseudo[:path], peer: peer})
-        # The session is up. From here the handler may open server-initiated streams.
-        Kernel.send(pid, :wt_ready)
+      # Reply 200 while the stream is still a bidi (it becomes a wt_session right after).
+      s = respond(s, qs, 200, false)
+      machine = :cow_http3_machine.become_webtransport_session(id, s.machine)
+      telem([:session, :open], %{session_id: id, path: pseudo[:path], peer: peer})
+      # The session is up. From here the handler may open server-initiated streams.
+      Kernel.send(pid, :wt_ready)
 
-        %{s | machine: machine, sessions: Map.put(s.sessions, id, pid), sess_qs: Map.put(s.sess_qs, id, qs)}
-        |> put_kind(qs, :session)
-
+      %{s | machine: machine, sessions: Map.put(s.sessions, id, pid), sess_qs: Map.put(s.sess_qs, id, qs)}
+      |> put_kind(qs, :session)
+    else
       {:reject, status} ->
         telem([:session, :rejected], %{path: pseudo[:path], status: status})
         reject(s, qs, status)
     end
   end
+
+  # `:handler` is either a module (with `:handler_arg`) or a function of conn_info returning
+  # `{module, arg}` or `{:reject, status}`. The function form is how one server serves
+  # several handlers by path.
+  defp resolve_handler(%{handler: route}, conn_info) when is_function(route, 1) do
+    case route.(conn_info) do
+      {:reject, _status} = rej -> rej
+      {mod, arg} -> {:ok, mod, arg}
+    end
+  end
+
+  defp resolve_handler(s, _conn_info), do: {:ok, s.handler, s.handler_arg}
 
   defp authorize(handler, conn_info) do
     if function_exported?(handler, :authorize, 1), do: handler.authorize(conn_info), else: :ok

@@ -383,6 +383,41 @@ defmodule Karutte.Http3.LoopbackTest do
     :quicer.shutdown_connection(conn)
   end
 
+  test "handler に関数を渡すと、conn_info（path）でハンドラを選べる（routing）" do
+    tmp = Path.join(System.tmp_dir!(), "karutte_h3r_#{System.unique_integer([:positive])}")
+    {:ok, cert} = Karutte.Http3.Cert.generate(tmp)
+    port = 14_450
+    test_pid = self()
+
+    start_supervised!(
+      {Karutte.Http3.Server,
+       port: port,
+       certfile: cert.certfile,
+       keyfile: cert.keyfile,
+       handler: fn
+         %{path: "/peer"} -> {Karutte.Http3.PeerReport, test_pid}
+         %{path: "/ok"} -> {Karutte.Http3.PathAuth, nil}
+         %{path: "/nope"} -> {Karutte.Http3.PathAuth, nil}
+         _ -> {:reject, 404}
+       end,
+       acceptors: 1,
+       name: Karutte.Http3.Server.RouteT}
+    )
+
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    conn = connect(port)
+    # 関数が選んだハンドラの init が走る（PeerReport は init で test pid へ報せる）
+    assert "200" == request_status(conn, "/peer")
+    assert_receive {:peer, _}, @recv_timeout
+    # 選ばれたハンドラの authorize/1 はそのまま効く
+    assert "200" == request_status(conn, "/ok")
+    assert "403" == request_status(conn, "/nope")
+    # 関数が {:reject, status} を返せば、その status で断る
+    assert "404" == request_status(conn, "/elsewhere")
+    :quicer.shutdown_connection(conn)
+  end
+
   test "多数の接続が同時に echo できる（acceptor プール／ConnectionSup）" do
     tmp = Path.join(System.tmp_dir!(), "karutte_h3cc_#{System.unique_integer([:positive])}")
     {:ok, cert} = Karutte.Http3.Cert.generate(tmp)

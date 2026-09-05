@@ -49,6 +49,25 @@ defmodule Heya.RoomTest do
     :gen_tcp.close(sa); :gen_tcp.close(sb)
   end
 
+  test "背圧: 溜まっている人には声を落とし、制御は落とさない" do
+    {:ok, a, _} = Heya.Room.join("t4", "a")
+    slow = spawn(fn -> receive do: (:never -> :ok) end)
+    {:ok, _b, _} = Heya.Room.join("t4", "b", slow)
+    assert_receive {:heya, <<0, _::binary>>}
+    # slow のメールボックスを一秒ぶん超えて埋める
+    for _ <- 1..60, do: send(slow, :junk)
+    Heya.Room.frame("t4", a, <<5>>)
+    Process.sleep(20)
+    {:messages, msgs} = Process.info(slow, :messages)
+    refute {:heya, <<a, 5>>} in msgs
+    # 制御(leave)は届く
+    Heya.Room.leave("t4", a)
+    Process.sleep(20)
+    {:messages, msgs} = Process.info(slow, :messages)
+    assert Enum.any?(msgs, &match?({:heya, <<0, _::binary>>}, &1))
+    Process.exit(slow, :kill)
+  end
+
   test "path の読みかた" do
     assert {:ok, "asobi", "ひなた"} = Heya.WT.parse("/asobi?name=%E3%81%B2%E3%81%AA%E3%81%9F")
     assert {:ok, "asobi", "だれか"} = Heya.WT.parse("/asobi")

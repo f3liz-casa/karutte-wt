@@ -16,8 +16,10 @@ defmodule Karutte.Http3.Server do
     * `:port`        — UDP port (required)
     * `:certfile`    — PEM certificate (required; for self-signed see `Karutte.Http3.Cert.generate/2`)
     * `:keyfile`     — PEM private key (required)
-    * `:handler`     — a module implementing `Karutte.WebTransport` (required)
-    * `:handler_arg` — first argument to `handler.init/2` (default `nil`)
+    * `:handler`     — a module implementing `Karutte.WebTransport` (required). Or a function of
+                       `conn_info` returning `{module, arg}` or `{:reject, status}`, to pick a
+                       handler per request (by path, say). See "Routing" below.
+    * `:handler_arg` — first argument to `handler.init/2` (default `nil`; unused with a routing function)
     * `:acceptors`   — number of concurrent acceptors (default 4)
     * `:name`        — base registered name for this server (default `Karutte.Http3.Server`)
     * `:max_sessions`           — WebTransport sessions per connection (default 16)
@@ -28,6 +30,20 @@ defmodule Karutte.Http3.Server do
     * `:bind`                   — address to listen on (for example `"10.9.0.2"`; all interfaces if omitted).
                                   Useful behind a transparent relay, to listen on the tunnel only.
     * `:keep_alive_interval_ms` — interval for server-initiated QUIC keepalives (keeps NAT / relay conntrack warm)
+
+  ## Routing
+
+  One server can serve several handlers. Pass a function as `:handler`; it receives the same
+  `conn_info` as `authorize/1` (`:path`, `:authority`, `:headers`, `:peer`) and returns the
+  handler to use, or a rejection:
+
+      handler: fn
+        %{path: "/echo" <> _} -> {Karutte.Http3.Echo, nil}
+        %{path: "/rooms/" <> _} -> {MyApp.Room, nil}
+        _ -> {:reject, 404}
+      end
+
+  The chosen handler's own `authorize/1` still runs afterwards.
 
   ## Telemetry
 

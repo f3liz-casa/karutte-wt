@@ -39,7 +39,7 @@ defmodule Heya.Application do
       Heya.Gate,
       {DynamicSupervisor, name: Heya.Rooms, strategy: :one_for_one},
       {Karutte.Http3.Server,
-       port: wt_port, certfile: certfile, keyfile: keyfile, handler: Heya.WT,
+       port: wt_port, certfile: certfile, keyfile: keyfile, handler: &route/1,
        max_sessions: 16, acceptors: 2, keep_alive_interval_ms: 15_000},
       {Heya.Tcp, port: env_int("HEYA_TCP_PORT", 7333)},
       {Bandit, [plug: Heya.Web, port: env_int("HEYA_HTTP_PORT", 4000)] ++ http}
@@ -47,6 +47,10 @@ defmodule Heya.Application do
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Heya.Supervisor)
   end
+
+  @doc "一つの port で二つの顔。`/wt…` は sukhi の橋(karutte のいままでの仕事)、それ以外は部屋。"
+  def route(%{path: "/wt" <> _}), do: {Karutte.Bridge, nil}
+  def route(_), do: {Heya.WT, nil}
 
   defp env_int(k, d), do: (System.get_env(k) || Integer.to_string(d)) |> String.to_integer()
 end

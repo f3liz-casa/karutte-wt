@@ -128,7 +128,7 @@ Supervisor.start_link(children, strategy: :one_for_one)
 |---|---|---|
 | `:port` | required | UDP port to listen on. |
 | `:certfile`, `:keyfile` | required | PEM files for TLS. |
-| `:handler` | required | Your `Karutte.WebTransport` module. |
+| `:handler` | required | Your `Karutte.WebTransport` module, or a routing function (below). |
 | `:handler_arg` | `nil` | Passed to `handler.init/2`. |
 | `:bind` | all interfaces | Listen on one address only. |
 | `:acceptors` | `4` | Number of acceptor processes. |
@@ -140,6 +140,21 @@ Supervisor.start_link(children, strategy: :one_for_one)
 | `:keep_alive_interval_ms` | off | Send QUIC PINGs at this interval (useful behind NAT or a relay). |
 | `:alpn` | `["h3"]` | ALPN list offered. |
 | `:name` | `Karutte.Http3.Server` | Registered name, if you run more than one. |
+
+### Serving several handlers from one port
+
+`:handler` can be a function of `conn_info` instead of a module. It returns `{module, arg}` for
+the handler to use, or `{:reject, status}`:
+
+```elixir
+handler: fn
+  %{path: "/echo" <> _} -> {Karutte.Http3.Echo, nil}
+  %{path: "/rooms/" <> _} -> {MyApp.Room, nil}
+  _ -> {:reject, 404}
+end
+```
+
+The chosen module's own `authorize/1` still runs after routing.
 
 ## Writing a handler
 

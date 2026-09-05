@@ -16,12 +16,18 @@ defmodule Heya.GateTest do
     Heya.Gate.open("g2", 0); refute Heya.Gate.open?("g2")
   end
 
-  test "WT の門番: 閉じた部屋は 403、開いた部屋は入れる、/wt は橋" do
+  test "WT の門番: 閉じた部屋は 403、開いた部屋は入れる" do
     assert {:reject, 403} = Heya.WT.authorize(%{path: "/g3?name=a"})
     Heya.Gate.open("g3")
     assert :ok = Heya.WT.authorize(%{path: "/g3?name=a"})
     assert {:reject, 404} = Heya.WT.authorize(%{path: "/"})
-    assert {:reject, 401} = Heya.WT.authorize(%{path: "/wt?ticket=nope"})
+  end
+
+  test "振り分け: /wt は橋(Karutte.Bridge)、それ以外は部屋(Heya.WT)" do
+    assert {Karutte.Bridge, nil} = Heya.Application.route(%{path: "/wt?ticket=nope"})
+    assert {Heya.WT, nil} = Heya.Application.route(%{path: "/g3?name=a"})
+    # 橋の門番はそのまま効く(にせのチケットは 401)
+    assert {:reject, 401} = Karutte.Bridge.authorize(%{path: "/wt?ticket=nope"})
   end
 
   test "ページ: 閉じていればログインの案内、cookie が admin なら「開く」、開けば部屋" do

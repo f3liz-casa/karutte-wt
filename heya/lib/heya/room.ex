@@ -4,8 +4,14 @@ defmodule Heya.Room do
 
   参加者は pid で居る。声が来たら、送った本人以外の pid に `{:heya, <<id, pcm>>}` を送る。
   自分の声が自分に戻らないのが、この部屋のいちばん大事なところ(エコーの消し合いが要らない)。
+
+  背圧: 受け手のメールボックスに声が溜まりすぎていたら(遅い回線・止まった koe)、その人の分は
+  落とす。声は best-effort で、遅れて届く一秒前の声に意味は無い。制御(join/leave)は落とさない。
   """
   use GenServer
+
+  # 受け手の未処理メッセージがこれを超えたら、その人には声を送らない(50 枠 = 一秒ぶん)。
+  @max_backlog 50
 
   defstruct name: nil, members: %{}, next: 1
 
@@ -64,7 +70,7 @@ defmodule Heya.Room do
 
   @impl true
   def handle_cast({:frame, id, pcm}, s) do
-    tell(s.members, id, <<id::8, pcm::binary>>)
+    tell(s.members, id, <<id::8, pcm::binary>>, &ready?/1)
     {:noreply, s}
   end
 
@@ -88,7 +94,15 @@ defmodule Heya.Room do
   defp after_drop(%{members: m} = s) when map_size(m) == 0, do: {:stop, :normal, s}
   defp after_drop(s), do: {:noreply, s}
 
-  defp tell(members, from, bin), do: for({i, m} <- members, i != from, do: send(m.pid, {:heya, bin}))
+  defp tell(members, from, bin, ok? \\ fn _ -> true end),
+    do: for({i, m} <- members, i != from, ok?.(m.pid), do: send(m.pid, {:heya, bin}))
+
+  defp ready?(pid) do
+    case Process.info(pid, :message_queue_len) do
+      {:message_queue_len, n} -> n <= @max_backlog
+      nil -> false
+    end
+  end
   defp control(map), do: <<0::8, Jason.encode!(map)::binary>>
   defp next_id(n, members), do: Enum.find((n + 1)..250, fn i -> not Map.has_key?(members, i) end) || 1
 end
