@@ -20,8 +20,8 @@ defmodule KarutteSukhi.MixProject do
 
   defp deps do
     [
-      # WebTransport サーバの芯。姉妹リポジトリ karutte-core（いまは隣の worktree を path で）。
-      {:karutte_wt, path: "../karutte-core"},
+      # The WebTransport server itself. Lives next door in the monorepo.
+      {:karutte_wt, path: "../core"},
       # sukhi の出す event を受ける NATS クライアント（sukhi と同じ Gnat）。
       {:gnat, "~> 1.9"}
     ]

@@ -1,0 +1,112 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ROOM}} · heya</title>
+<style>
+  body { font: 16px system-ui, sans-serif; max-width: 32rem; margin: 3rem auto; padding: 0 1rem; color: #333; }
+  h1 { font-weight: normal; font-size: 1.2rem; }
+  #members li { padding: .2rem 0; } #members li.talking { font-weight: bold; }
+  button { font: inherit; padding: .5rem 1rem; }
+  #log { color: #888; font-size: .9rem; white-space: pre-wrap; }
+</style>
+<h1>{{ROOM}}</h1>
+<p><input id="name" placeholder="なまえ" value=""> <button id="join">入る</button> <button id="leave" hidden>出る</button></p>
+<ul id="members"></ul>
+<div id="log"></div>
+{{ADMIN}}
+<script>
+// 声の部屋のクライアント。マイク → 16k PCM 20ms → WebTransport datagram。
+// 返ってくるのは <<id, pcm>>(自分以外)と <<0, json>>(だれが居るか)。
+const ROOM = "{{ROOM}}", WT_URL = "{{WT_URL}}", HASH = "{{HASH}}";
+const $ = s => document.querySelector(s);
+const log = t => { $("#log").textContent = (t + "\n" + $("#log").textContent).slice(0, 2000); };
+let wt, ctx, me = 0, members = new Map(), talking = new Map();
+
+// 送る側: 128 サンプルの render quantum を 320 にまとめて Int16 で出す
+const SENDER = `
+class Sender extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = new Float32Array(320); this.n = 0; }
+  process(inputs) {
+    const ch = inputs[0][0]; if (!ch) return true;
+    for (let i = 0; i < ch.length; i++) {
+      this.buf[this.n++] = ch[i];
+      if (this.n === 320) {
+        const out = new Int16Array(320);
+        for (let k = 0; k < 320; k++) out[k] = Math.max(-1, Math.min(1, this.buf[k])) * 32767;
+        this.port.postMessage(out.buffer, [out.buffer]); this.n = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor("sender", Sender);`;
+
+// 鳴らす側: 参加者ごとの列から 128 ずつ取って足す(無ければ 0)
+const PLAYER = `
+class Player extends AudioWorkletProcessor {
+  constructor() { super(); this.q = new Map(); this.port.onmessage = e => {
+    const { id, pcm } = e.data; if (!this.q.has(id)) this.q.set(id, []); this.q.get(id).push(new Float32Array(pcm)); }; }
+  process(_, outputs) {
+    const out = outputs[0][0]; out.fill(0);
+    for (const [id, list] of this.q) {
+      let need = out.length, at = 0;
+      while (need > 0 && list.length) {
+        const head = list[0], take = Math.min(need, head.length);
+        for (let i = 0; i < take; i++) out[at + i] += head[i];
+        if (take === head.length) list.shift(); else list[0] = head.subarray(take);
+        at += take; need -= take;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor("player", Player);`;
+
+const blob = s => URL.createObjectURL(new Blob([s], { type: "application/javascript" }));
+
+async function join() {
+  const name = $("#name").value.trim() || "だれか";
+  const opts = HASH ? { serverCertificateHashes: [{ algorithm: "sha-256", value: Uint8Array.from(atob(HASH), c => c.charCodeAt(0)) }] } : {};
+  wt = new WebTransport(`${WT_URL}/${encodeURIComponent(ROOM)}?name=${encodeURIComponent(name)}`, opts);
+  await wt.ready; log("つながった");
+  const writer = wt.datagrams.writable.getWriter();
+
+  ctx = new AudioContext({ sampleRate: 16000 });
+  await ctx.audioWorklet.addModule(blob(SENDER)); await ctx.audioWorklet.addModule(blob(PLAYER));
+  const mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
+  const sender = new AudioWorkletNode(ctx, "sender"); ctx.createMediaStreamSource(mic).connect(sender);
+  sender.port.onmessage = e => writer.write(new Uint8Array(e.data)).catch(() => {});
+  const player = new AudioWorkletNode(ctx, "player"); player.connect(ctx.destination);
+
+  $("#join").hidden = true; $("#leave").hidden = false;
+  (async () => {
+    const reader = wt.datagrams.readable.getReader();
+    for (;;) {
+      const { value, done } = await reader.read(); if (done) break;
+      const id = value[0];
+      if (id === 0) { control(JSON.parse(new TextDecoder().decode(value.subarray(1)))); continue; }
+      const i16 = new Int16Array(value.buffer, value.byteOffset + 1, (value.byteLength - 1) >> 1);
+      const f32 = new Float32Array(i16.length); for (let k = 0; k < i16.length; k++) f32[k] = i16[k] / 32768;
+      let loud = 0; for (let k = 0; k < f32.length; k += 8) loud += Math.abs(f32[k]);
+      talking.set(id, loud > 1 ? Date.now() : (talking.get(id) || 0));
+      player.port.postMessage({ id, pcm: f32.buffer }, [f32.buffer]);
+    }
+    log("切れた");
+  })();
+  setInterval(render, 300);
+}
+
+function control(m) {
+  if (m.you) { me = m.you; members = new Map(m.members.map(x => [x.id, x.name])); }
+  if (m.join) members.set(m.join.id, m.join.name);
+  if (m.leave) members.delete(m.leave);
+  render();
+}
+function render() {
+  $("#members").innerHTML = [...members].map(([id, n]) =>
+    `<li class="${Date.now() - (talking.get(id) || 0) < 500 ? "talking" : ""}">${n}${id === me ? "(自分)" : ""}</li>`).join("");
+}
+$("#join").onclick = () => join().catch(e => log("だめだった: " + e.message));
+$("#leave").onclick = () => { wt?.close(); ctx?.close(); location.reload(); };
+if (!("WebTransport" in window)) log("このブラウザは WebTransport が無い(Chrome か Firefox で)");
+</script>

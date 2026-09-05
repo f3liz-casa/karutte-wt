@@ -1,6 +1,6 @@
 # karutte-sukhi
 
-[karutte-core](../karutte-core)（BEAM 上の WebTransport サーバ）を、fedi サーバ **sukhi** の
+[karutte-core](../core)（BEAM 上の WebTransport サーバ）を、fedi サーバ **sukhi** の
 live タイムラインを配る最前線として使うための応用。芯は core に、ここには sukhi の事情だけ。
 
 ## この repo の構成
@@ -20,8 +20,8 @@ live タイムラインを配る最前線として使うための応用。芯は
 mix test
 ```
 
-`karutte_wt` は path 依存（`../karutte-core`）。Dockerfile はビルド文脈の外を見られないので、
-コンテナで組むときは core を hex か git 依存に切り替える必要がある（まだ）。
+`karutte_wt` は path 依存（`../core`）。Dockerfile はモノレポのルートをビルド文脈にして
+`docker build -f sukhi/Dockerfile .` で組む。
 
 ## ドキュメント
 

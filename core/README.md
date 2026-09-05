@@ -249,9 +249,10 @@ spot a mistake, please say so.
 
 ## Related
 
-- **karutte-sukhi**: the application this was carved out of. Ed25519 admission tickets, a
+- **[karutte-sukhi](../sukhi/)**: the application this was carved out of. Ed25519 admission tickets, a
   NATS-to-WebTransport bridge for a fediverse server's live timeline, and a transparent L4 relay.
   Everything that is about one deployment rather than about WebTransport lives there.
+- **[heya](../heya/)**: an audio-only room on WebTransport datagrams, built on this library.
 
 ## About this repository
 

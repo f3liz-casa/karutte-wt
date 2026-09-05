@@ -1,7 +1,6 @@
-# karutte-sukhi を走らせる箱。注意: karutte_wt が path 依存(../karutte-core)のあいだは
-# ビルド文脈の外なので、このままでは組めない。core を git/hex 依存にしてから。
-# quicer(msquic) をソースからビルドするので、
-# cmake / build-essential / perl(openssl) が要る。単一ステージ（origin の spike なので素直に）。
+# A container for karutte-sukhi. Build from the monorepo root so ../core is in the context:
+#   docker build -f sukhi/Dockerfile -t karutte-sukhi .
+# quicer (msquic) is built from source, so cmake / build-essential / perl (openssl) are needed.
 FROM hexpm/elixir:1.17.3-erlang-27.1.2-ubuntu-jammy-20260509
 
 RUN apt-get update \
@@ -9,18 +8,23 @@ RUN apt-get update \
      build-essential cmake ninja-build perl git openssl ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
 RUN mix local.hex --force && mix local.rebar --force
 
-COPY mix.exs mix.lock ./
+# core first: its mix.exs is what the path dep resolves to.
+WORKDIR /app/core
+COPY core/mix.exs core/mix.lock ./
+COPY core/lib lib
+
+WORKDIR /app/sukhi
+COPY sukhi/mix.exs sukhi/mix.lock ./
 RUN mix deps.get
 
-COPY lib lib
-COPY test test
-# quicer の NIF（msquic + quictls）をここでビルド。時間がかかる所。
-# run.exs はこの後に COPY ＝ run.exs だけ変えても msquic の再ビルドにならない。
+COPY sukhi/lib lib
+COPY sukhi/test test
+# The quicer NIF (msquic + quictls) is built here. This is the slow step.
+# run.exs is copied afterwards, so changing only run.exs does not rebuild msquic.
 RUN mix compile
-COPY run.exs ./
+COPY sukhi/run.exs ./
 
-# 既定は echo サーバを上げる。WT_BIND / WT_PORT で listen 先を差し替え。
+# With WT_TICKET_PUBKEY set this runs the Bridge; without it, the echo server.
 CMD ["sh", "-c", "mix run --no-halt run.exs"]
