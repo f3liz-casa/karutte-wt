@@ -10,7 +10,7 @@ defmodule Karutte.MixProject do
       deps: deps(),
       name: "karutte-core",
       description:
-        "A layered behaviour sketch for WebTransport on the BEAM, with verified fragments."
+        "WebTransport over HTTP/3 for Elixir, on quicer and cowlib. Layered behaviours, one process per stream, works with real browsers."
     ]
   end
 
