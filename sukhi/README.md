@@ -1,34 +1,48 @@
 # karutte-sukhi
 
-[karutte-core](../core)（BEAM 上の WebTransport サーバ）を、fedi サーバ **sukhi** の
-live タイムラインを配る最前線として使うための応用。芯は core に、ここには sukhi の事情だけ。
+The application [karutte-core](../core) was carved out of: the front line that pushes the
+**sukhi** fediverse server's live timeline to browsers over WebTransport. The library is in
+`core/`; only sukhi's own business is here.
 
-## この repo の構成
+## Layout
 
-- **ルート** … `Karutte.Ticket`（sukhi が Ed25519 で署名した入場チケットの検証）と
-  `Karutte.Bridge`（NATS の feed を 1 feed = 1 uni ストリームで WebTransport へ流すハンドラ）。
-  `run.exs` が、`WT_TICKET_PUBKEY` があれば Bridge、無ければ core の echo を上げる。
-- **`wt-relay/`** … 透過 L4 リレー／L4 テレメトリの「庭師」（**別ランタイム・別コンテナ**の姉妹
-  プロジェクト）。karutte を Cloudflare の裏や使い捨ての最前線に置くときの下回りで、netfilter を
-  宣言的に維持しつつ暗号の手前で flood を数える。ランタイムを分けているのは意図的で、
-  「観測者は観測対象より長生きすべき」「netfilter 権限を最前線プロセスに渡さない」から。
-  設計は [`wt-relay/docs/edge-design.md`](wt-relay/docs/edge-design.md)。
+- **Root**: two modules and a runner.
+  - `Karutte.Ticket` verifies admission tickets that sukhi signs with Ed25519. karutte holds
+    only the public key, so every connection is checked locally, right after the TLS
+    handshake, without asking sukhi. Cheap to refuse, which matters under a flood.
+  - `Karutte.Bridge` is the WebTransport handler. It checks the ticket in `authorize/1`, and
+    once the session is up it subscribes to one NATS subject per feed the ticket allows
+    (`local`, `bubble`, `user`, `direct`) and opens **one unidirectional stream per feed**. A
+    noisy feed cannot head-of-line block a quiet one, because each stream has its own flow
+    control. Every event is one newline-delimited JSON frame.
+  - `run.exs` starts the Bridge when `WT_TICKET_PUBKEY` is set, otherwise core's echo server.
+- **`wt-relay/`**: a transparent L4 (WireGuard) relay and its control daemon, a separate
+  runtime in a separate container. The data plane is the kernel (iptables / conntrack /
+  WireGuard); the daemon only keeps the netfilter rules matching a declared spec and reports
+  telemetry. It puts karutte behind a disposable public IP, preserves the real client address,
+  and counts floods before decryption. Separate on purpose: the observer should outlive what
+  it observes, and netfilter privileges should not sit in the front-line process.
 
-## 使う
+## Running
 
 ```sh
 mix test
 ```
 
-`karutte_wt` は path 依存（`../core`）。Dockerfile はモノレポのルートをビルド文脈にして
-`docker build -f sukhi/Dockerfile .` で組む。
+`karutte_wt` is a path dependency on `../core`. The Dockerfile expects the monorepo root as
+its build context:
 
-## ドキュメント
+```sh
+docker build -f sukhi/Dockerfile -t karutte-sukhi .
+```
 
-- [`docs/wt-relay-integration.md`](docs/wt-relay-integration.md) — エッジ経路（透過 L4・実 IP 保存・秘匿・flood）の karutte 側。
-- [`wt-relay/`](wt-relay/) — L4 リレー／テレメトリの庭師（別ランタイム）。
+## Documents (Japanese)
 
-## このリポジトリについて
+- [`docs/wt-relay-integration.md`](docs/wt-relay-integration.md): the karutte side of the edge
+  path (transparent L4, real-IP preservation, origin hiding, floods).
+- [`wt-relay/docs/edge-design.md`](wt-relay/docs/edge-design.md): the relay's design.
 
-設計の見立てと骨組みは、Shiro（Claude Opus 4.8）が @nyanrus の横にすわって一緒に
-組んだもの。読み違えている所があれば、おしえてください。
+## About
+
+Drafted by Shiro (Claude), an AI assistant working alongside [@nyanrus](https://github.com/nyanrus).
+If something here is a misreading, please say so.
