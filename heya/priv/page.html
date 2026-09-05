@@ -15,14 +15,15 @@
 <div id="log"></div>
 {{ADMIN}}
 <script>
-// 声の部屋のクライアント。マイク → 16k PCM 20ms → WebTransport datagram。
-// 返ってくるのは <<id, pcm>>(自分以外)と <<0, json>>(だれが居るか)。
+// 声の部屋のクライアント。マイク → 16k 20ms → Opus(WebCodecs) → WebTransport datagram。
+// 返ってくるのは <<id, opus>>(自分以外)と <<0, json>>(だれが居るか)。
+// Opus の DTX を入れているので、黙っているあいだはほとんど何も送らない。
 const ROOM = "{{ROOM}}", WT_URL = "{{WT_URL}}", HASH = "{{HASH}}";
 const $ = s => document.querySelector(s);
 const log = t => { $("#log").textContent = (t + "\n" + $("#log").textContent).slice(0, 2000); };
 let wt, ctx, me = 0, members = new Map(), talking = new Map();
 
-// 送る側: 128 サンプルの render quantum を 320 にまとめて Int16 で出す
+// 送る側: 128 サンプルの render quantum を 320(20ms)にまとめて Float32 で出す。Opus にするのは本線で
 const SENDER = `
 class Sender extends AudioWorkletProcessor {
   constructor() { super(); this.buf = new Float32Array(320); this.n = 0; }
@@ -31,8 +32,7 @@ class Sender extends AudioWorkletProcessor {
     for (let i = 0; i < ch.length; i++) {
       this.buf[this.n++] = ch[i];
       if (this.n === 320) {
-        const out = new Int16Array(320);
-        for (let k = 0; k < 320; k++) out[k] = Math.max(-1, Math.min(1, this.buf[k])) * 32767;
+        const out = this.buf; this.buf = new Float32Array(320);
         this.port.postMessage(out.buffer, [out.buffer]); this.n = 0;
       }
     }
@@ -64,6 +64,26 @@ registerProcessor("player", Player);`;
 
 const blob = s => URL.createObjectURL(new Blob([s], { type: "application/javascript" }));
 
+// Opus(16k mono、24kbps、DTX)。送るのは一つ、受けるのは参加者ごとに一つ(codec は状態を持つ)
+const OPUS = { codec: "opus", sampleRate: 16000, numberOfChannels: 1 };
+function encoder(onPacket) {
+  const enc = new AudioEncoder({ output: chunk => { const u = new Uint8Array(chunk.byteLength); chunk.copyTo(u); onPacket(u); },
+                                 error: e => log("encoder: " + e.message) });
+  enc.configure({ ...OPUS, bitrate: 24000, opus: { usedtx: true } });
+  let ts = 0;
+  return f32 => {
+    const data = new AudioData({ format: "f32", sampleRate: 16000, numberOfFrames: 320, numberOfChannels: 1, timestamp: ts, data: f32 });
+    ts += 20000; enc.encode(data); data.close();
+  };
+}
+function decoder(onPcm) {
+  const dec = new AudioDecoder({ output: data => { const f32 = new Float32Array(data.numberOfFrames); data.copyTo(f32, { planeIndex: 0, format: "f32" }); data.close(); onPcm(f32); },
+                                 error: e => log("decoder: " + e.message) });
+  dec.configure(OPUS);
+  let ts = 0;
+  return u8 => { dec.decode(new EncodedAudioChunk({ type: "key", timestamp: ts, data: u8 })); ts += 20000; };
+}
+
 async function join() {
   const name = $("#name").value.trim() || "だれか";
   const opts = HASH ? { serverCertificateHashes: [{ algorithm: "sha-256", value: Uint8Array.from(atob(HASH), c => c.charCodeAt(0)) }] } : {};
@@ -75,8 +95,10 @@ async function join() {
   await ctx.audioWorklet.addModule(blob(SENDER)); await ctx.audioWorklet.addModule(blob(PLAYER));
   const mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
   const sender = new AudioWorkletNode(ctx, "sender"); ctx.createMediaStreamSource(mic).connect(sender);
-  sender.port.onmessage = e => writer.write(new Uint8Array(e.data)).catch(() => {});
+  const encode = encoder(pkt => writer.write(pkt).catch(() => {}));
+  sender.port.onmessage = e => encode(new Float32Array(e.data));
   const player = new AudioWorkletNode(ctx, "player"); player.connect(ctx.destination);
+  const decoders = new Map();
 
   $("#join").hidden = true; $("#leave").hidden = false;
   (async () => {
@@ -85,11 +107,12 @@ async function join() {
       const { value, done } = await reader.read(); if (done) break;
       const id = value[0];
       if (id === 0) { control(JSON.parse(new TextDecoder().decode(value.subarray(1)))); continue; }
-      const i16 = new Int16Array(value.buffer, value.byteOffset + 1, (value.byteLength - 1) >> 1);
-      const f32 = new Float32Array(i16.length); for (let k = 0; k < i16.length; k++) f32[k] = i16[k] / 32768;
-      let loud = 0; for (let k = 0; k < f32.length; k += 8) loud += Math.abs(f32[k]);
-      talking.set(id, loud > 1 ? Date.now() : (talking.get(id) || 0));
-      player.port.postMessage({ id, pcm: f32.buffer }, [f32.buffer]);
+      if (!decoders.has(id)) decoders.set(id, decoder(f32 => {
+        let loud = 0; for (let k = 0; k < f32.length; k += 8) loud += Math.abs(f32[k]);
+        talking.set(id, loud > 1 ? Date.now() : (talking.get(id) || 0));
+        player.port.postMessage({ id, pcm: f32.buffer }, [f32.buffer]);
+      }));
+      decoders.get(id)(value.slice(1));
     }
     log("切れた");
   })();
@@ -109,4 +132,5 @@ function render() {
 $("#join").onclick = () => join().catch(e => log("だめだった: " + e.message));
 $("#leave").onclick = () => { wt?.close(); ctx?.close(); location.reload(); };
 if (!("WebTransport" in window)) log("このブラウザは WebTransport が無い(Chrome か Firefox で)");
+if (!("AudioEncoder" in window)) log("このブラウザは WebCodecs の音が無い(Opus にできない)");
 </script>

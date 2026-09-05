@@ -10,9 +10,10 @@ koe(Julia)              ── TCP 127.0.0.1:7333 ──┤── Heya.Room  自
 ページ                   ── Bandit :4000 /<部屋>  ┘
 ```
 
-枠は一つ: `<<from::8, pcm::binary>>`。from=0 は制御(JSON: you/members/join/leave)、1〜250 は参加者。
-pcm は 16kHz mono Int16 LE、20ms(320 サンプル)ずつ。サーバは混ぜない。混ぜるのは受ける側
-(ブラウザは AudioWorklet で、koe は `Heya.mix!`)。**自分の声は自分に戻らない**ので、エコー消しが要らない。
+枠は一つ: `<<from::8, opus::binary>>`。from=0 は制御(JSON: you/members/join/leave)、1〜250 は参加者。
+声は Opus(16kHz mono、20ms = 320 サンプルが一包み、24kbps、ブラウザは DTX)。サーバは中身を見ないし、混ぜない。
+混ぜるのは受ける側(ブラウザは WebCodecs で戻して AudioWorklet、koe は libopus で戻して `Heya.mix!`)。
+**自分の声は自分に戻らない**ので、エコー消しが要らない。
 
 ```
 mix deps.get && mix test          # 4 本
@@ -25,4 +26,4 @@ koe は `KOE_HEYA=asobi julia --project=. -t 2 koe.jl`(部屋では起き番な�
 本番: `HEYA_CERTFILE`/`HEYA_KEYFILE` に本物の証明書、`HEYA_WT_PORT=443`。UDP 443 を箱まで直に通す
 (Cloudflare Tunnel は H3 を運ばない)。Zulip の realm 設定「Jitsi server URL」を `https://<host>` に。
 
-まだ: Safari 向けの WebSocket の逃げ道 / Opus(いまは生 PCM 256kbps) / 部屋の中の順番(名前を呼ばれたら答える、人どうしの話に相槌を打たない)。
+まだ: Safari 向けの WebSocket の逃げ道 / 部屋の中の順番(名前を呼ばれたら答える、人どうしの話に相槌を打たない)。

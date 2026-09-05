@@ -1,7 +1,7 @@
 defmodule Heya.WT do
   @moduledoc """
   ブラウザの口。karutte の WebTransport ハンドラ。部屋のことだけ。
-  `/<部屋>?name=<名前>` で入る。門が開いているときだけ。datagram が声(640 バイトの PCM)。
+  `/<部屋>?name=<名前>` で入る。門が開いているときだけ。datagram が声(Opus の一包み)。
   部屋から `{:heya, bin}` が来たら、そのまま datagram で返す。
 
   `/wt…`(sukhi の橋)はここには来ない。`Heya.Application` が path で `Karutte.Bridge` に振り分けている。

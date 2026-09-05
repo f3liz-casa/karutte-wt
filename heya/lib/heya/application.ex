@@ -6,8 +6,8 @@ defmodule Heya.Application do
     koe     ── 素の TCP(127.0.0.1:7333)        ──┤── Heya.Room(fan-out、自分の声は返さない)
     ページ  ── Bandit(:4000、/<部屋>)            ┘
 
-  枠は一つ: `<<from::8, pcm::binary>>`。from=0 は制御(JSON)、1〜250 は参加者。
-  pcm は 16kHz mono Int16 LE、20ms(320 サンプル=640 バイト)ずつ。
+  枠は一つ: `<<from::8, opus::binary>>`。from=0 は制御(JSON)、1〜250 は参加者。
+  声は Opus(16kHz mono、20ms が一包み)。サーバは中身を見ない。
   """
   use Application
 
