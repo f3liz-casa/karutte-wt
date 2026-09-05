@@ -1,0 +1,5 @@
+# Per-project build output (each of core/ sukhi/ heya/ has its own too)
+**/_build/
+**/deps/
+**/doc/
+erl_crash.dump
