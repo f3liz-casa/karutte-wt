@@ -5,7 +5,7 @@
 #   3. karutte を止めて heya を上げる(UDP 443=WT、TCP 443=ページ)。戻すときは docker start karutte
 # 秘密は箱の ~/heya.env(0600)。無ければ bin/env-on-box.sh で作る。
 set -eu
-BOX=${BOX:-deploy@138.2.62.89}
+BOX=${BOX:?BOX=user@host を渡してください(箱の住所は repo に置かない)}
 TAG=${TAG:-v$(date +%Y%m%d%H%M)}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 KARUTTE=${KARUTTE:-$HERE/../core}

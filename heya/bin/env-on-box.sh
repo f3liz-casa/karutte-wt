@@ -2,7 +2,7 @@
 # 箱の ~/heya.env を作る(一度だけ)。いまの karutte の env(橋の鍵・NATS・証明書)を引き継ぎ、
 # OAuth の鍵は Mac の ~/.secrets/.env.heya から、HEYA_SECRET は箱で新しく作る。値は画面に出さない。
 set -eu
-BOX=${BOX:-deploy@138.2.62.89}
+BOX=${BOX:?BOX=user@host を渡してください(箱の住所は repo に置かない)}
 scp -q "$HOME/.secrets/.env.heya" "$BOX:~/heya.env.oauth"
 ssh "$BOX" '
   set -e

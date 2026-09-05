@@ -41,7 +41,8 @@ Open `http://localhost:4000/asobi`, enter a name, press 入る. koe joins with
 
 Production: `HEYA_CERTFILE` / `HEYA_KEYFILE` for a real certificate, `HEYA_WT_PORT=443`.
 UDP 443 has to reach the box directly (Cloudflare Tunnel does not carry HTTP/3). Set Zulip's
-"Jitsi server URL" to `https://<host>`. `bin/deploy.sh` ships it.
+"Jitsi server URL" to `https://<host>`. `BOX=user@host bin/deploy.sh` ships it; the box's
+address is not kept in the repo.
 
 Path dependencies: `../core` and `../sukhi`.
 
