@@ -244,10 +244,16 @@ defmodule Karutte.Http3.Connection do
     {:noreply, s}
   end
 
+  # Datagrams are fire-and-forget (RFC 9221). The synchronous send_dgram blocks this
+  # connection process until msquic reports the send state, about one RTT, which throttled a
+  # 50/s voice stream to 20/s and delayed it (measured in heya). The send-state notification
+  # is discarded in the clause below.
   def handle_info({:datagram, sid, data}, s) do
-    :quicer.send_dgram(s.qconn, :erlang.iolist_to_binary(:cow_http3.datagram(sid, data)))
+    :quicer.async_send_dgram(s.qconn, :erlang.iolist_to_binary(:cow_http3.datagram(sid, data)))
     {:noreply, s}
   end
+
+  def handle_info({:quic, :dgram_send_state, _c, _}, s), do: {:noreply, s}
 
   # The transport's close/2: close just that WebTransport session (the QUIC connection stays up for the others).
   def handle_info({:close_session, sid, code}, s) do
