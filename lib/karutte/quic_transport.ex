@@ -1,12 +1,13 @@
 defmodule Karutte.QuicTransport do
   @moduledoc """
-  L1 の差し替え口（依存性逆転）。揺れている床はここだけ。
+  L1, the swappable transport interface (dependency inversion). The only layer that moves.
 
-  具体実装（将来の `Karutte.QuicTransport.Quicer` など）がこの behaviour を満たす。
-  上層（Session/Stream）は中身を知らない。
+  Concrete transports (`Karutte.QuicTransport.Quicer`, `Karutte.QuicTransport.Http3`,
+  `Karutte.QuicTransport.Http2`) implement this behaviour. The layers above (Session, Stream)
+  know nothing about what is underneath.
 
-  ストリームハンドルは affine リソース＝controlling process はちょうど一つ。
-  だから `control/2` で所有を一つの pid に移すのが基本操作。
+  A stream handle is an affine resource: exactly one controlling process. So the basic
+  operation is `control/2`, which moves ownership to a single pid.
   """
 
   @type conn :: term()
@@ -15,39 +16,41 @@ defmodule Karutte.QuicTransport do
   @type code :: non_neg_integer()
   @type error :: {:error, term()}
 
-  # --- 命令的な面（L3/L4 が呼ぶ） ---
+  # --- Imperative side (called by L3/L4) ---
 
-  @doc "サーバ起点でストリームを開く"
+  @doc "Open a stream from the server side."
   @callback open_stream(conn, dir, keyword()) :: {:ok, stream} | error
 
   @doc """
-  このストリームの所有を pid へ手渡す（handoff の実体）。
+  Hand ownership of this stream to `pid` (the mechanism behind handoff).
 
-  順序の約束: 先着分（まだ古いオーナーに溜まっているバイト）を `{:handoff_done, stream,
-  buffered}` で pid へ渡し、以後の live を `{:quic, :data, …}` 契約で pid へ流す。
-  先着分の在り処は床ごとに違う（quicer は NIF バッファ、H3 は Connection の per-stream
-  バッファ）ので、その差を吸うのが control の役。新オーナーは handoff_done を受けるまで
-  live に触れない（`Karutte.WebTransport.Handoff.wait/2`）。
+  The ordering promise: deliver whatever arrived early (bytes still buffered with the old
+  owner) to `pid` as `{:handoff_done, stream, buffered}`, then route all later live traffic
+  to `pid` under the `{:quic, :data, ...}` contract. Where the early bytes live differs per
+  transport (quicer keeps them in the NIF buffer, H3 in the Connection's per-stream buffer),
+  and absorbing that difference is what `control/2` is for. The new owner must not touch
+  live traffic until `handoff_done` arrives (`Karutte.WebTransport.Handoff.wait/2`).
   """
   @callback control(stream, pid) :: :ok | error
 
   @doc """
-  AXIS 2 のつまみ。あと何メッセージ届けたら passive に戻すか。
-  passive に戻る＝下で QUIC_STATUS_PENDING＝MAX_STREAM_DATA の窓が伸びない。
+  The AXIS 2 knob: how many more messages to deliver before going passive again.
+  Going passive means QUIC_STATUS_PENDING underneath, which means the MAX_STREAM_DATA window
+  stops growing.
   """
   @callback set_active(stream, :once | non_neg_integer() | boolean()) :: :ok | error
 
   @callback send(stream, iodata(), fin: boolean()) :: :ok | error
 
-  @doc "FIN（書き側半閉じ）/ RESET_STREAM / STOP_SENDING"
+  @doc "FIN (half-close the write side) / RESET_STREAM / STOP_SENDING."
   @callback shutdown(stream, :write | {:reset, code} | {:stop_sending, code}) :: :ok | error
 
-  @doc "datagram 送信。フロー制御なし＝送り手側で落ちうる。best-effort。"
+  @doc "Send a datagram. No flow control, so it may be dropped on the sending side. Best effort."
   @callback send_datagram(conn, iodata()) :: :ok | error
 
   @callback close(conn, code) :: :ok
 
-  # --- メッセージ契約（所有プロセスのメールボックスに届く形） ---
+  # --- Message contract (what lands in the owning process's mailbox) ---
 
   @type stream_msg ::
           {:quic, :data, stream, binary(), [fin: boolean()]}
@@ -55,7 +58,7 @@ defmodule Karutte.QuicTransport do
           | {:quic, :closed, stream, reason :: term()}
           | {:quic, :reset, stream, code}
 
-  @typedoc "制御面（接続 owner だけが受ける）。data は流れてこない。"
+  @typedoc "Control plane (received only by the connection owner). No data flows through here."
   @type conn_msg ::
           {:quic, :new_stream, conn, stream, dir}
           | {:quic, :datagram, conn, binary()}

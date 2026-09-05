@@ -1,31 +1,32 @@
 defmodule Karutte.WebTransport.Session do
   @moduledoc """
-  L3 セッションランナー ＝ `Karutte.WebTransport` behaviour を実際に回す GenServer。
+  The L3 session runner: the GenServer that actually drives a `Karutte.WebTransport` module.
 
-  制御面だけを持つ（不変条件: ストリームのバイトには触れない）。床から来るのは
-  `Karutte.QuicTransport` の契約メッセージ（`normalize/1` 済みの `{:quic, …}`）だけ。
-  **だから床に依らない** — QUIC でも HTTP/2 でも、このランナーは同じコードで回る。
-  そこが層を分けたことのごほうび。
+  It holds the control plane only (invariant: it never touches stream bytes). All it receives
+  from the transport are `Karutte.QuicTransport` contract messages (`{:quic, ...}`, already
+  through `normalize/1`). **So it does not depend on the transport**: on QUIC or on HTTP/2,
+  this runner is the same code. That is the reward for separating the layers.
 
-  受け持つこと:
+  What it handles:
 
-    * `{:quic, :new_stream, …}` → `handle_stream/3` を呼び、返ってきた処分で分岐
-      - `{:handler, mod, arg}` … `StreamServer` を起こし、handoff して所有権を渡す
-      - `{:inline, max}`       … `Inline` 機械でバッファし、FIN で `handle_inline_stream/3`
-      - `{:reset, code}`       … 要らないので reset
-    * `{:quic, :datagram, …}`  → `handle_datagram/2`（軸の外。無ければ drop）
-    * `{:quic, :closed, …}`    → 寿命の終わり
-    * それ以外                 → `handle_info/2`
+    * `{:quic, :new_stream, ...}` → calls `handle_stream/3` and branches on the disposition
+      - `{:handler, mod, arg}`: starts a `StreamServer` and hands ownership over
+      - `{:inline, max}`: buffers through the `Inline` machine, then `handle_inline_stream/3` on FIN
+      - `{:reset, code}`: not wanted, reset it
+    * `{:quic, :datagram, ...}` → `handle_datagram/2` (off-axis; dropped if not implemented)
+    * `{:quic, :closed, ...}` → end of life
+    * anything else → `handle_info/2`
 
-  handoff の順序（競合窓を閉じる）は `Karutte.WebTransport.Handoff` の約束に従う:
-  先着分を吸い出す → 新オーナーへ渡す → `control/2` で床の宛先を切替。
+  Handoff ordering (closing the race window) follows the promise in
+  `Karutte.WebTransport.Handoff`: drain what arrived early → hand it to the new owner →
+  switch the transport's target with `control/2`.
   """
 
   use GenServer
 
   alias Karutte.{Inline, WebTransport.StreamServer}
 
-  # ストリームハンドラがクラッシュしたときに相手へ返す WT アプリエラーコード。
+  # The WebTransport application error code sent to the peer when a stream handler crashes.
   @stream_crash_code 0
 
   @typep st :: %{
@@ -38,19 +39,19 @@ defmodule Karutte.WebTransport.Session do
          }
 
   @doc """
-  起こす。`opts`:
-    * `:transport` — `Karutte.QuicTransport` の実装モジュール（床）
-    * `:conn`      — 床の接続ハンドル
-    * `:handler`   — `Karutte.WebTransport` を満たすセッションモジュール
-    * `:init_arg`  — `handler.init/2` の第一引数
-    * `:conn_info` — `handler.init/2` の第二引数（既定 `%{}`）
+  Start the session. `opts`:
+    * `:transport` — the `Karutte.QuicTransport` implementation
+    * `:conn`      — the transport's connection handle
+    * `:handler`   — the session module implementing `Karutte.WebTransport`
+    * `:init_arg`  — first argument to `handler.init/2`
+    * `:conn_info` — second argument to `handler.init/2` (default `%{}`)
   """
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
 
   @impl true
   def init(opts) do
-    # StreamServer を link で持つが、その事故を握る（＝一つのストリームハンドラが落ちても
-    # セッション全体を道連れにしない）ために exit を trap する。
+    # StreamServers are linked, but we trap exits so that one stream handler crashing does not
+    # take the whole session down with it.
     Process.flag(:trap_exit, true)
     mod = Keyword.fetch!(opts, :handler)
     init_arg = Keyword.get(opts, :init_arg)
@@ -79,7 +80,7 @@ defmodule Karutte.WebTransport.Session do
     {:noreply, dispatch(disp, stream, %{s | state: state})}
   end
 
-  # inline と決めたストリームのバイト（control していないのでここに届く）。
+  # Bytes of a stream dispositioned inline (never handed off, so they arrive here).
   def handle_info({:quic, :data, stream, bin, meta}, s) when is_map_key(s.inline, stream) do
     fin? = Keyword.get(meta, :fin, false)
 
@@ -106,9 +107,9 @@ defmodule Karutte.WebTransport.Session do
     {:stop, {:shutdown, reason}, s}
   end
 
-  # EXIT の相手で分岐:
-  #   - StreamServer（子）が落ちた → 異常ならそのストリームだけ reset し、セッションは生かす。
-  #   - それ以外（親の Connection 等）が落ちた → セッションも畳む。
+  # Branch on who exited:
+  #   - a StreamServer (child): if abnormal, reset only that stream; the session lives on.
+  #   - anything else (the parent Connection, say): fold the session too.
   def handle_info({:EXIT, pid, reason}, s) do
     case Enum.find(s.owners, fn {_stream, p} -> p == pid end) do
       {stream, _} ->
@@ -142,7 +143,7 @@ defmodule Karutte.WebTransport.Session do
     :ok
   end
 
-  # --- 処分の分岐 ---
+  # --- Disposition branches ---
 
   @spec dispatch(Karutte.WebTransport.disposition(), term(), st()) :: st()
   defp dispatch({:handler, smod, arg}, stream, s) do
@@ -154,9 +155,9 @@ defmodule Karutte.WebTransport.Session do
         init_arg: arg
       )
 
-    # 競合窓を閉じる handoff は床（control/2）の責務。床ごとに先着分の在り処が違う
-    # （quicer は NIF バッファ、H3 は Connection の per-stream バッファ）ので、
-    # 「先着分→handoff_done→live を pid へ順に渡す」を control が引き受ける。
+    # Closing the handoff race window is the transport's job (control/2). Where the early bytes
+    # live differs per transport (quicer: the NIF buffer; H3: the Connection's per-stream
+    # buffer), so control takes on "early bytes → handoff_done → live, to pid, in that order".
     :ok = s.transport.control(stream, pid)
     put_in(s.owners[stream], pid)
   end
@@ -168,7 +169,8 @@ defmodule Karutte.WebTransport.Session do
     s
   end
 
-  # optional callback: 実装が無ければ state を素通し（datagram は drop、inline は捨てる）。
+  # Optional callback: without an implementation, state passes through untouched
+  # (datagrams are dropped, inline streams discarded).
   defp call_optional(mod, fun, args, default_state) do
     if function_exported?(mod, fun, length(args)) do
       {:ok, state} = apply(mod, fun, args)

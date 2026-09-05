@@ -1,5 +1,5 @@
-# karutte-core を走らせる箱。quicer(msquic) をソースからビルドするので、
-# cmake / build-essential / perl(openssl) が要る。単一ステージ（origin の spike なので素直に）。
+# A container for karutte-core. quicer builds msquic from source, so it needs
+# cmake / build-essential / perl (openssl). Single stage, kept simple.
 FROM hexpm/elixir:1.17.3-erlang-27.1.2-ubuntu-jammy-20260509
 
 RUN apt-get update \
@@ -15,10 +15,10 @@ RUN mix deps.get
 
 COPY lib lib
 COPY test test
-# quicer の NIF（msquic + quictls）をここでビルド。時間がかかる所。
-# run.exs はこの後に COPY ＝ run.exs だけ変えても msquic の再ビルドにならない。
+# The quicer NIF (msquic + quictls) is built here. This is the slow step.
+# run.exs is copied afterwards, so changing only run.exs does not rebuild msquic.
 RUN mix compile
 COPY run.exs ./
 
-# echo サーバを上げる。WT_BIND / WT_PORT で listen 先を差し替え。
+# Start the echo server. WT_BIND / WT_PORT change where it listens.
 CMD ["sh", "-c", "mix run --no-halt run.exs"]

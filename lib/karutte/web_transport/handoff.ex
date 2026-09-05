@@ -1,26 +1,26 @@
 defmodule Karutte.WebTransport.Handoff do
   @moduledoc """
-  ストリーム所有権の手渡しの、順序の約束。
+  The ordering promise for handing a stream from one owner to another.
 
-  `{:quic, :new_stream}` を受けた瞬間、そのストリームのバイトはまだ
-  古いオーナー（セッション=接続 owner）のメールボックスに届きうる。
-  新オーナーがいきなり live を読み始めると、その隙間に来たデータは
-  古いオーナーに残されて **消える**。
+  The moment `{:quic, :new_stream}` is received, bytes for that stream can still land in the
+  old owner's mailbox (the session, or the connection owner). If the new owner starts reading
+  live traffic straight away, anything that arrived in that gap stays with the old owner and
+  is **lost**.
 
-  約束はひとつ:
+  One promise fixes it:
 
-      古いオーナー: 先着分を吸い出す → 新オーナーへ渡す（complete/2）
-      新オーナー:   handoff_done を受けるまで live に触れない（wait/2）→ 先に再生
+      old owner: drain what already arrived → hand it to the new owner (complete/2)
+      new owner: touch nothing live until handoff_done arrives (wait/2) → replay that first
 
-  これで無損失・無順序狂いになる。`test/handoff_test.exs` が両側を確かめる。
+  No loss, no reordering. `test/handoff_test.exs` checks both sides.
   """
 
   alias Karutte.QuicTransport
 
   @doc """
-  古いオーナー側。自分のメールボックスに先着している当該ストリームの
-  data を順序のまま吸い出し、新オーナーへ `{:handoff_done, stream, buffered}` で渡す。
-  この後 `QuicTransport.control/2` で transport の宛先を新オーナーへ切り替える想定。
+  Old-owner side. Drain, in order, the data for this stream that already sits in our mailbox
+  and hand it to the new owner as `{:handoff_done, stream, buffered}`. Afterwards the caller
+  is expected to point the transport at the new owner with `QuicTransport.control/2`.
   """
   @spec complete(QuicTransport.stream(), pid()) :: :ok
   def complete(stream, new_owner) do
@@ -30,8 +30,8 @@ defmodule Karutte.WebTransport.Handoff do
   end
 
   @doc """
-  新オーナー側。`handoff_done` を待ち、再生すべき先着分を返す。
-  これを受け取るまで live のストリームメッセージに触れてはいけない。
+  New-owner side. Wait for `handoff_done` and return the buffered chunks to replay. Until this
+  returns, live stream messages must not be touched.
   """
   @spec wait(QuicTransport.stream(), timeout()) ::
           {:ok, [{binary(), keyword()}]} | {:error, :handoff_timeout}
@@ -43,7 +43,7 @@ defmodule Karutte.WebTransport.Handoff do
     end
   end
 
-  # 既にメールボックスにある {:quic, :data, stream, bin, meta} だけを順序のまま集める
+  # Collect, in order, only the {:quic, :data, stream, bin, meta} messages already in the mailbox.
   defp drain(stream, acc) do
     receive do
       {:quic, :data, ^stream, bin, meta} -> drain(stream, [{bin, meta} | acc])

@@ -1,28 +1,29 @@
 defmodule Karutte.WebTransport.StreamServer do
   @moduledoc """
-  L4 ストリームランナー ＝ `Karutte.WebTransport.Stream` behaviour を回す GenServer。
-  1 ストリーム = 1 プロセス（affine な床のハンドルの唯一の所有者）。
+  The L4 stream runner: the GenServer that drives a `Karutte.WebTransport.Stream` module.
+  One stream = one process (the sole owner of the transport's affine stream handle).
 
-  これも床に依らない。契約メッセージ（`{:quic, :data, …}`）を受けて `handle_in/2` /
-  `handle_fin/1` を呼び、返ってきた `ret` を床の命令へ翻訳する:
+  This too is transport-independent. It receives contract messages (`{:quic, :data, ...}`),
+  calls `handle_in/2` / `handle_fin/1`, and translates the returned `ret` into transport
+  operations:
 
-      {:ok, state, demand}        → set_active(demand)
+      {:ok, state, demand}         → set_active(demand)
       {:push, data, state, demand} → send(data); set_active(demand)
       {:push_fin, data, state}     → send(data, fin: true)
       {:close_write, state}        → shutdown(:write)
-      {:reset, code, state}        → shutdown({:reset, code}); 終了
-      {:stop, reason, state}       → 終了
+      {:reset, code, state}        → shutdown({:reset, code}); stop
+      {:stop, reason, state}       → stop
 
-  `demand`（`active:`）だけが per-stream の窓つまみ ＝ AXIS 2（MAX_STREAM_DATA）。
-  ここにしか出てこない。
+  `demand` (`active:`) is the only per-stream window knob, AXIS 2 (MAX_STREAM_DATA). It
+  appears nowhere else.
 
-  ## handoff の順序
+  ## Handoff ordering
 
-  `init` で `start_link` がブロックするので、その中で handoff を待つとセッションと
-  デッドロックする（セッションは `start_link` が返ってから `complete/2` を呼ぶ）。
-  だから `init` は `mod.init/2` で初期 state と初期 demand を作るだけにして、
-  **active 化はしない**。handoff の待ち・先着分の再生・active 化は `handle_continue`
-  に逃がす。これで「吸い出す → 渡す → 再生 → active 化」の一直線が守られる。
+  `start_link` blocks in `init`, so waiting for the handoff there would deadlock with the
+  session (which calls `complete/2` only after `start_link` returns). So `init` only runs
+  `mod.init/2` to get the initial state and initial demand, and **does not activate**.
+  Waiting for the handoff, replaying the early bytes, and activating all happen in
+  `handle_continue`. That keeps the straight line "drain → hand over → replay → activate".
   """
 
   use GenServer
@@ -38,11 +39,11 @@ defmodule Karutte.WebTransport.StreamServer do
          }
 
   @doc """
-  起こす。`opts`:
-    * `:transport` — 床のモジュール
-    * `:stream`    — 床のストリームハンドル
-    * `:handler`   — `Karutte.WebTransport.Stream` を満たすモジュール
-    * `:init_arg`  — `handler.init/2` の第二引数
+  Start the runner. `opts`:
+    * `:transport` — the transport module
+    * `:stream`    — the transport's stream handle
+    * `:handler`   — a module implementing `Karutte.WebTransport.Stream`
+    * `:init_arg`  — second argument to `handler.init/2`
   """
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
@@ -54,7 +55,7 @@ defmodule Karutte.WebTransport.StreamServer do
     init_arg = Keyword.get(opts, :init_arg)
 
     s = %{transport: transport, stream: stream, mod: mod, state: nil, demand: []}
-    # init の ret から state と初期 demand を取るが、active 化は handoff 後まで待つ。
+    # Take state and initial demand from init's ret, but hold off activating until after handoff.
     {s, action} = absorb(mod.init(stream, init_arg), s, _activate? = false)
 
     case action do
@@ -67,7 +68,7 @@ defmodule Karutte.WebTransport.StreamServer do
   def handle_continue(:handoff, s) do
     case Handoff.wait(s.stream) do
       {:ok, buffered} ->
-        # 先着分を順序のまま handle_in に流す（active 化はまだ）。終端なら止まる。
+        # Replay the early bytes through handle_in in order (still not activating). Stop on a terminal ret.
         result =
           Enum.reduce_while(buffered, {s, :cont}, fn {bin, meta}, {acc, :cont} ->
             case feed(bin, meta, acc, false) do
@@ -77,7 +78,7 @@ defmodule Karutte.WebTransport.StreamServer do
           end)
 
         case result do
-          # ここで初めて active 化（init と先着再生で決まった demand を床へ渡す）。
+          # Activate for the first time here (the demand settled by init and the replay goes to the transport).
           {s, :cont} ->
             activate(s)
             {:noreply, s}
@@ -121,9 +122,9 @@ defmodule Karutte.WebTransport.StreamServer do
     :ok
   end
 
-  # data（と meta の FIN）を handle_in → handle_fin に流し、ret を翻訳する。
-  # 終端アクションは握り潰さず後段へ通す。activate? が true のときだけ demand を
-  # 床へ即反映（handoff 中は false で貯める）。
+  # Run data (and the FIN in meta) through handle_in → handle_fin and translate the ret.
+  # Terminal actions are passed on, never swallowed. Demand goes to the transport immediately
+  # only when activate? is true (false during handoff, where it is held).
   defp feed(bin, meta, s, activate?) do
     step1 =
       if bin == <<>>,
@@ -143,7 +144,7 @@ defmodule Karutte.WebTransport.StreamServer do
     end
   end
 
-  # GenServer の戻り値が要る経路（handle_info）向けの薄い包み。
+  # Thin wrapper for paths that need a GenServer return value (handle_info).
   defp drive(ret, s, activate?) do
     case absorb(ret, s, activate?) do
       {s, :cont} -> {:noreply, s}
@@ -151,7 +152,7 @@ defmodule Karutte.WebTransport.StreamServer do
     end
   end
 
-  # ret を解釈して副作用を出し、state/demand を更新。返り: {state, :cont | {:stop, reason}}。
+  # Interpret a ret: perform side effects, update state/demand. Returns {state, :cont | {:stop, reason}}.
   @spec absorb(Karutte.WebTransport.Stream.ret(), st(), boolean()) :: {st(), :cont | {:stop, term()}}
   defp absorb({:ok, state, demand}, s, activate?),
     do: {set_demand(%{s | state: state}, demand, activate?), :cont}
@@ -178,7 +179,7 @@ defmodule Karutte.WebTransport.StreamServer do
 
   defp absorb({:stop, reason, state}, s, _activate?), do: {%{s | state: state}, {:stop, reason}}
 
-  # demand を貯める（handoff 中）か、即床へ反映するか。
+  # Hold the demand (during handoff) or apply it to the transport right away.
   defp set_demand(s, demand, true) do
     activate(%{s | demand: demand})
     %{s | demand: demand}

@@ -1,22 +1,23 @@
 defmodule Karutte.Http3.Cert do
   @moduledoc """
-  WebTransport 用の自己署名証明書を作る小道具。
+  A small tool for making self-signed certificates that browsers accept for WebTransport.
 
-  ブラウザは WebTransport で `serverCertificateHashes` を使うと、CA 無しの自己署名でも
-  繋げる。ただし条件がある（Chrome）:
+  With `serverCertificateHashes`, a browser will connect to a self-signed certificate with no
+  CA involved. There are conditions (Chrome's):
 
-    * ECDSA（P-256）であること
-    * 有効期間が **14 日以内**であること
-    * その DER の SHA-256 を、繋ぐ側が `serverCertificateHashes` に渡してピン留めする
+    * ECDSA (P-256)
+    * valid for **14 days or less**
+    * the connecting side pins the SHA-256 of the DER in `serverCertificateHashes`
 
-  ここでは openssl にそれを作らせて、cert.pem / key.pem と、ブラウザに渡す SHA-256
-  （base64 と hex）を返すだけ。prod で「ちゃんとした CA 証明書」を使うなら、この道具では
-  なく certfile/keyfile を直接 `Karutte.Http3.Server` に渡せばよい。
+  This module has openssl produce exactly that and returns cert.pem / key.pem plus the
+  SHA-256 to hand to the browser (base64 and hex). For production with a real CA
+  certificate, skip this and pass certfile/keyfile straight to `Karutte.Http3.Server`.
   """
 
   @doc """
-  `dir` に cert.pem / key.pem を生成し、`%{certfile, keyfile, sha256_b64, sha256_hex}`
-  を返す。`:days` は既定 13（14 日上限の内側）。
+  Write cert.pem / key.pem into `dir` and return
+  `%{certfile, keyfile, sha256_b64, sha256_hex}`. `:days` defaults to 13 (inside the 14-day
+  limit). `:cn` defaults to `"localhost"`.
   """
   @spec generate(Path.t(), keyword()) ::
           {:ok, %{certfile: Path.t(), keyfile: Path.t(), sha256_b64: String.t(), sha256_hex: String.t()}}
@@ -28,8 +29,8 @@ defmodule Karutte.Http3.Cert do
     certfile = Path.join(dir, "cert.pem")
     File.mkdir_p!(dir)
 
-    # 鍵は PKCS#8（"BEGIN PRIVATE KEY"）で。msquic/quictls はこの形を読む
-    # （SEC1 "EC PRIVATE KEY" だと TLS 初期化で弾かれることがある）。
+    # The key is written as PKCS#8 ("BEGIN PRIVATE KEY"), which msquic/quictls reads.
+    # SEC1 ("EC PRIVATE KEY") can be rejected during TLS initialisation.
     with {_, 0} <-
            System.cmd(
              "openssl",

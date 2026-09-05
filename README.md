@@ -209,6 +209,15 @@ A few things worth knowing as you go further:
 
 The callbacks are documented in `Karutte.WebTransport` and `Karutte.WebTransport.Stream`.
 
+## Building the docs
+
+```sh
+mix docs
+```
+
+The module docs are grouped by role (server, behaviours, runners, transports, wire) and
+open at `doc/index.html`.
+
 ## Running the tests
 
 ```sh

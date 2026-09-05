@@ -1,17 +1,21 @@
 defmodule Karutte.WebTransport.Stream do
   @moduledoc """
-  L4 ストリーム behaviour ＝ データ面。1 ストリーム = 1 プロセスがこれを回す。
-  WebSock とほぼ同型。違いは二つだけ:
+  L4, the stream behaviour. Data plane. One stream = one process running this.
 
-    1. demand 旋（WebSocket は常時 active で TCP が下で隠すが、ここは見える）
-    2. half-close（FIN は方向ごと。WebSocket には無い）
+  It is almost the same shape as WebSock. Only two things differ:
+
+    1. Demand is visible. WebSocket is always active and TCP hides the window underneath;
+       here the window is yours.
+    2. Half-close. FIN is per direction, which WebSocket does not have.
   """
 
   alias Karutte.QuicTransport
 
   @type state :: term()
 
-  @typedoc "AXIS 2 — MAX_STREAM_DATA。返すたびに付く。ここだけが per-stream の窓つまみ。"
+  @typedoc """
+  AXIS 2, MAX_STREAM_DATA. Attached to every return. This is the only per-stream window knob.
+  """
   @type demand :: [active: :once | non_neg_integer() | boolean()]
 
   @type ret ::
@@ -24,10 +28,13 @@ defmodule Karutte.WebTransport.Stream do
 
   @callback init(QuicTransport.stream(), init_arg :: term()) :: ret
 
-  @doc "peer からのバイト。ここで返す demand が、相手に返すフロー制御クレジットそのもの。"
+  @doc """
+  Bytes from the peer. The demand you return here is, literally, the flow-control credit
+  handed back to them.
+  """
   @callback handle_in(binary(), state) :: ret
 
-  @doc "peer が書き側を半閉じした（FIN を見た）。こちらはまだ書ける。"
+  @doc "The peer half-closed its write side (we saw FIN). We can still write."
   @callback handle_fin(state) :: ret
 
   @callback handle_info(term(), state) :: ret

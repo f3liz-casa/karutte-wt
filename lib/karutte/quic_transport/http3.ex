@@ -1,22 +1,22 @@
 defmodule Karutte.QuicTransport.Http3 do
   @moduledoc """
-  L1 の床、本物の三つ目 ＝ WebTransport over HTTP/3（quicer + cowlib）。
+  The third real L1 transport: WebTransport over HTTP/3 (quicer + cowlib).
 
-  `Karutte.QuicTransport` behaviour を満たす。`Quicer`（素の QUIC）/ `Http2`（TCP）と
-  同じ顔。上層（Session / StreamServer runner）はこの床の上でも同じコードで回る。
+  Implements `Karutte.QuicTransport`, with the same face as `Quicer` (raw QUIC) and `Http2`
+  (TCP). The layers above (Session, the StreamServer runner) run unchanged on top of it.
 
-  ## 形
+  ## Shape
 
-  この床は **薄いプロキシ**で、実体は `Karutte.Http3.Connection`（QUIC 接続を一つ持つ
-  GenServer）。Connection が quicer の唯一の所有者になり、cow_http3_machine で H3 を
-  捌き、WT ストリーム/datagram を runner へ振る。だから床の命令は Connection への
-  メッセージに落ちる:
+  This transport is a **thin proxy**. The substance is `Karutte.Http3.Connection`, a GenServer
+  that owns one QUIC connection. The Connection is quicer's sole owner, drives HTTP/3 through
+  `cow_http3_machine`, and routes WebTransport streams and datagrams to the runner. So every
+  transport operation lowers to a message to the Connection:
 
       conn    = {:h3c, conn_pid, qconn, session_id}
       stream  = {:h3s, conn_pid, qstream}
 
-  所有が一プロセスに集まることで、quicer のハンドルの affine 性も、handoff の競合窓も、
-  Connection の中だけで閉じる（cross-process の quicer 所有権の綾を避ける）。
+  Keeping ownership in one process means quicer's affine handles and the handoff race window
+  are both settled inside the Connection, with no cross-process quicer ownership to untangle.
   """
 
   @behaviour Karutte.QuicTransport

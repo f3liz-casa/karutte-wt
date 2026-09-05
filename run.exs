@@ -1,12 +1,14 @@
-# karutte の echo origin を上げる小さな起点。
-# listen 先と flood 向けの上限を環境変数で締められるようにしてある（再ビルド不要で調整可）。
+# A small entry point that starts the karutte echo server.
+# The listen address and the flood-related limits are taken from environment variables,
+# so they can be tuned without a rebuild.
 env = fn k, d -> System.get_env(k, d) |> String.to_integer() end
 
 port = env.("WT_PORT", "4433")
 bind = System.get_env("WT_BIND")
 
-# 本番は公開 CA(Let's Encrypt)の cert/key を env で渡す。無ければ自己署名
-# （serverCertificateHashes 用、13 日）にフォールバック＝ローカル検証や spike 向け。
+# In production, pass a public-CA (Let's Encrypt) cert/key through the environment. Without
+# them, fall back to a self-signed certificate (13 days, for serverCertificateHashes), which
+# is meant for local checks and spikes.
 {certfile, keyfile} =
   case {System.get_env("WT_CERTFILE"), System.get_env("WT_KEYFILE")} do
     {c, k} when is_binary(c) and is_binary(k) ->
@@ -26,7 +28,7 @@ opts =
     keyfile: keyfile,
     handler: Karutte.Http3.Echo,
     keep_alive_interval_ms: 15_000,
-    # flood 向けに既定より締める（x64 は小さい箱・最前線）。env で上書き可。
+    # Tighter than the defaults, with floods in mind (a small box on the front line). Override via env.
     max_connections: env.("WT_MAX_CONNECTIONS", "2000"),
     max_sessions: env.("WT_MAX_SESSIONS", "8"),
     max_datagram_queue: env.("WT_MAX_DATAGRAM_QUEUE", "256"),

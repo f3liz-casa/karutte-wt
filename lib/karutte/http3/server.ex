@@ -1,38 +1,41 @@
 defmodule Karutte.Http3.Server do
   @moduledoc """
-  WebTransport over HTTP/3 のサーバ。監視ツリーひと組。
+  The WebTransport over HTTP/3 server. One supervision tree.
 
       Karutte.Http3.Server (Supervisor)
-      ├── Karutte.Http3.Listener        … UDP ポートを開けっ放しにする番人
-      ├── ConnectionSup (DynamicSupervisor) … 接続ごとの Connection（temporary）
-      └── Karutte.Http3.Acceptor × N    … 受け付け（permanent、落ちたら再起動）
+      ├── Karutte.Http3.Listener            … keeps the UDP port open
+      ├── ConnectionSup (DynamicSupervisor) … one Connection per QUIC connection (temporary)
+      └── Karutte.Http3.Acceptor × N        … accept loop (permanent, restarted on crash)
 
-  接続一つの事故は ConnectionSup の中で閉じ、acceptor が落ちても再起動して受け付けは
-  続く。リスナはツリーの寿命と一致して開閉する。`child_spec/1` を持つので、ふつうに
-  自分のアプリの supervision tree に子として挿せる。
+  A failure in one connection stays inside ConnectionSup. If an acceptor dies it restarts and
+  accepting continues. The listener opens and closes with the tree. `child_spec/1` is
+  provided, so this drops into your own application's supervision tree as a child.
 
-  opts:
-    * `:port`        — UDP ポート（必須）
-    * `:certfile`    — PEM 証明書（必須。自己署名は `Karutte.Http3.Cert.generate/2`）
-    * `:keyfile`     — PEM 秘密鍵（必須）
-    * `:handler`     — `Karutte.WebTransport` を満たすモジュール（必須）
-    * `:handler_arg` — handler.init/2 の第一引数（既定 nil）
-    * `:acceptors`   — 同時 accept 数（既定 4）
-    * `:name`        — このサーバの登録名のベース（既定 `Karutte.Http3.Server`）
-    * `:max_sessions`           — 1 接続あたりの WT セッション上限（既定 16）
-    * `:max_connections`        — 同時接続の上限（既定 10_000。超えたら新規は断る）
-    * `:max_datagram_queue`     — セッションの datagram 滞留の上限（既定 1_000。超えたら drop）
-    * `:idle_timeout_ms`        — 既定 30_000
-    * `:peer_bidi_stream_count` / `:peer_unidi_stream_count` — 既定 256
-    * `:bind`                   — 待ち受けアドレス（例 "10.9.0.2"。省略時は全 IF）。
-                                  wt-relay の裏で WG だけで待つとき用。
-    * `:keep_alive_interval_ms` — server 発 QUIC keepalive の間隔（NAT/relay の conntrack 温存）
+  ## Options
 
-  観測（telemetry）: `[:karutte, :http3, :connection, :start | :stop]`,
-  `[:karutte, :http3, :session, :open | :close]`, `[:karutte, :http3, :datagram, :dropped]`,
-  `[:karutte, :http3, :connection, :rejected]`。
+    * `:port`        — UDP port (required)
+    * `:certfile`    — PEM certificate (required; for self-signed see `Karutte.Http3.Cert.generate/2`)
+    * `:keyfile`     — PEM private key (required)
+    * `:handler`     — a module implementing `Karutte.WebTransport` (required)
+    * `:handler_arg` — first argument to `handler.init/2` (default `nil`)
+    * `:acceptors`   — number of concurrent acceptors (default 4)
+    * `:name`        — base registered name for this server (default `Karutte.Http3.Server`)
+    * `:max_sessions`           — WebTransport sessions per connection (default 16)
+    * `:max_connections`        — concurrent connections (default 10_000; new ones are refused beyond it)
+    * `:max_datagram_queue`     — datagrams queued per session (default 1_000; dropped beyond it)
+    * `:idle_timeout_ms`        — default 30_000
+    * `:peer_bidi_stream_count` / `:peer_unidi_stream_count` — default 256
+    * `:bind`                   — address to listen on (for example `"10.9.0.2"`; all interfaces if omitted).
+                                  Useful behind a transparent relay, to listen on the tunnel only.
+    * `:keep_alive_interval_ms` — interval for server-initiated QUIC keepalives (keeps NAT / relay conntrack warm)
 
-  例:
+  ## Telemetry
+
+  `[:karutte, :http3, :connection, :start | :stop | :rejected]`,
+  `[:karutte, :http3, :session, :open | :close | :rejected]`,
+  `[:karutte, :http3, :datagram, :dropped]`.
+
+  ## Example
 
       {:ok, cert} = Karutte.Http3.Cert.generate("priv/cert")
       {:ok, _} = Karutte.Http3.Server.start_link(
@@ -56,14 +59,14 @@ defmodule Karutte.Http3.Server do
   end
 
   @doc """
-  graceful shutdown（ローリング再起動向け）。
+  Graceful shutdown, for rolling restarts.
 
-    1. acceptor を止めて新規接続を受けない
-    2. 生きている各接続に GOAWAY ＋ 各 WT セッションへ DRAIN を配る（クライアントに移行を促す）
-    3. `grace_ms` 待つ
-    4. ツリーごと停止
+    1. Stop the acceptors so no new connections are taken.
+    2. Send GOAWAY on every live connection and DRAIN to every WebTransport session, so clients migrate.
+    3. Wait `grace_ms`.
+    4. Stop the whole tree.
 
-  ブロックする。別プロセスで呼ぶか、deploy スクリプトから。
+  This blocks. Call it from another process, or from a deploy script.
   """
   @spec drain(atom(), non_neg_integer()) :: :ok
   def drain(name \\ __MODULE__, grace_ms \\ 5_000) do

@@ -1,10 +1,11 @@
 defmodule Karutte.Http3.Acceptor do
   @moduledoc """
-  接続を受け付ける worker。`accept` でブロックして待ち、来たら handshake して、
-  接続用の `DynamicSupervisor` の下に `Karutte.Http3.Connection` を起こして所有権を移す。
+  A worker that accepts connections. It blocks in `accept`, and when a connection arrives it
+  starts a `Karutte.Http3.Connection` under the connection `DynamicSupervisor` and hands
+  ownership over.
 
-  exit を trap しないので、監視ツリーの shutdown では accept の receive ごと素直に殺される。
-  permanent なので落ちても再起動して受け付けを続ける。
+  It does not trap exits, so on supervisor shutdown it is simply killed, blocking receive and
+  all. It is `permanent`, so if it crashes it restarts and keeps accepting.
   """
 
   use GenServer
@@ -38,13 +39,14 @@ defmodule Karutte.Http3.Acceptor do
 
   @impl true
   def handle_continue(:accept, s) do
-    # accept したら即 Connection へ所有権を渡す。handshake は Connection 側でやる
-    # （acceptor が抱えると、handshake 直後〜引き渡しの隙にクライアントの早いストリーム
-    # イベントが acceptor のメールボックスに落ちて失われる。かつ handshake が acceptor
-    # 直列になる。所有者=Connection が handshake すればどちらも消える）。
+    # Hand ownership to the Connection immediately after accept. The handshake happens on the
+    # Connection side. If the acceptor did it, a client's early stream events could land in the
+    # acceptor's mailbox in the gap between handshake and handoff and be lost, and handshakes
+    # would serialize on the acceptor. With the owner (Connection) doing the handshake, both
+    # problems go away.
     case :quicer.accept(s.listener, [], :infinity) do
       {:ok, conn} -> spawn_connection(conn, s)
-      {:error, reason} -> Logger.debug("accept 失敗: #{inspect(reason)}")
+      {:error, reason} -> Logger.debug("accept failed: #{inspect(reason)}")
     end
 
     {:noreply, s, {:continue, :accept}}
@@ -67,12 +69,12 @@ defmodule Karutte.Http3.Acceptor do
         Connection.setup(pid)
 
       {:error, :max_children} ->
-        # 同時接続の上限。静かに断る（接続を閉じる）。
+        # Connection limit reached. Refuse quietly by closing the connection.
         :telemetry.execute([:karutte, :http3, :connection, :rejected], %{count: 1}, %{reason: :max_children})
         :quicer.async_shutdown_connection(conn, 0, 0)
 
       {:error, reason} ->
-        Logger.warning("Connection 起動失敗: #{inspect(reason)}")
+        Logger.warning("failed to start Connection: #{inspect(reason)}")
         :quicer.async_shutdown_connection(conn, 0, 0)
     end
   end

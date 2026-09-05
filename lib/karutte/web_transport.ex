@@ -1,16 +1,18 @@
 defmodule Karutte.WebTransport do
   @moduledoc """
-  L3 セッション behaviour ＝ 制御面だけ。
-  accept / handoff の処分 / datagram の分配 / 寿命 を捌く。
-  不変条件: **ストリームのバイトには絶対に触れない**（触れたら HoL が復活する）。
+  L3, the session behaviour. Control plane only.
 
-  Plug の縫い目（参考、別モジュールにはしない）:
+  It handles accept, the disposition of each new stream, datagram delivery, and the session's
+  lifetime. One invariant: **it never touches stream bytes**. The moment it does, head-of-line
+  blocking is back.
 
-      # ふつうの Plug router の中で:
+  The Plug seam, for reference (kept in `Karutte.WebTransportAdapter`):
+
+      # inside an ordinary Plug router:
       conn
       |> WebTransportAdapter.upgrade(MySession, init_arg, opts)
       # => Plug.Conn.upgrade_adapter(conn, :webtransport, {MySession, init_arg, opts})
-      # WebSockAdapter.upgrade/4 と対称。Plug 自体は変えない。
+      # mirrors WebSockAdapter.upgrade/4; Plug itself is untouched.
   """
 
   alias Karutte.QuicTransport
@@ -18,10 +20,11 @@ defmodule Karutte.WebTransport do
   @type state :: term()
 
   @typedoc """
-  peer が開いたストリームの処分。
-  - {:handler, mod, arg} … 長命: owner プロセスを立てて Stream を回す
-  - {:inline, max}      … 短命: FIN まで L3 が ≤max でバッファし一塊で渡す（太った datagram 扱い）
-  - {:reset, code}      … 要らない
+  What to do with a stream the peer opened.
+
+  - `{:handler, mod, arg}`: long-lived. Start an owner process that runs `mod` as a `Karutte.WebTransport.Stream`.
+  - `{:inline, max}`: short-lived. L3 buffers it up to `max` bytes until FIN and delivers it whole (think "a fat datagram").
+  - `{:reset, code}`: not wanted.
   """
   @type disposition ::
           {:handler, module(), term()}
@@ -29,41 +32,48 @@ defmodule Karutte.WebTransport do
           | {:reset, QuicTransport.code()}
 
   @doc """
-  任意。CONNECT を受けるか諮る。セッションを起こす前に呼ばれる。
+  Optional. Decide whether to accept the CONNECT. Called before the session process exists.
 
-  `conn_info` には `:path` / `:authority` / `:headers`（Extended CONNECT の中身）が入る。
-  `:ok` で受け（200）、`{:reject, status}` で断る（その status を返してストリームを閉じる）。
-  認証・ルーティングの門番。実装が無ければ常に受ける。
+  `conn_info` carries `:path`, `:authority`, `:headers` (the Extended CONNECT request) and
+  `:peer`. Return `:ok` to accept (200) or `{:reject, status}` to refuse with that status and
+  close the stream. This is the gate for authentication and routing. Without an implementation,
+  everything is accepted.
   """
   @callback authorize(conn_info :: map()) :: :ok | {:reject, 100..599}
 
   @callback init(session :: term(), conn_info :: map()) :: {:ok, state} | {:stop, term()}
 
   @doc """
-  AXIS 1 — MAX_STREAMS（生成の背圧）。
-  ストリーム数の窓は **この callback が処分を返す速さ** でしか進まない。
-  ここに active/demand のつまみは無い（生成と転送は別軸）。
+  AXIS 1, MAX_STREAMS (backpressure on stream creation).
+
+  The stream-count window only advances as fast as **this callback returns a disposition**.
+  There is no active/demand knob here: creation and transfer are separate axes.
   """
   @callback handle_stream(QuicTransport.stream(), QuicTransport.dir(), state) ::
               {disposition, state}
 
-  @doc "{:inline, max} を選んだストリームが FIN まで揃ったとき、一塊で届く。L3 が組み立て、上限で reset 済み。"
+  @doc """
+  A stream that was dispositioned `{:inline, max}` arrives here whole once its FIN is in.
+  L3 assembled it and has already reset anything over the limit.
+  """
   @callback handle_inline_stream(QuicTransport.stream(), binary(), state) :: {:ok, state}
 
   @doc """
-  OFF-AXIS — datagram にフロー制御は無い（RFC 9221）。
-  方針は drop であってブロックではない。背圧つまみを置かない＝ストリームの demand と混ざらない。
-  落とす/落とさないは有界キューの **設定** であって、ここの返り値ではない。
+  OFF-AXIS. Datagrams have no flow control (RFC 9221).
+
+  The policy is drop, not block. There is no backpressure knob here, so it can never get
+  tangled with stream demand. Whether datagrams are dropped is a **setting** on the bounded
+  queue, not a return value from this callback.
   """
   @callback handle_datagram(binary(), state) :: {:ok, state}
 
   @doc """
-  任意。プロセスへの一般メッセージ。
+  Optional. Ordinary messages sent to the session process.
 
-  セッションが立った直後に `:wt_ready` が届く。ここから先はハンドラが
-  `transport.open_stream(conn, :uni)` で **server 発のストリーム（server push）** を開いて
-  送れる（`conn` は `init/2` の `conn_info` にある）。それより前（`init/2` の最中）はまだ
-  セッションが確立していないので開けない。
+  `:wt_ready` arrives right after the session is established. From then on the handler may
+  open **server-initiated streams** with `transport.open_stream(conn, :uni)` (`conn` is in the
+  `conn_info` given to `init/2`). Before that, during `init/2`, the session is not yet up and
+  streams cannot be opened.
   """
   @callback handle_info(term(), state) :: {:ok, state} | {:stop, term(), state}
 

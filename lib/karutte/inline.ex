@@ -1,10 +1,11 @@
 defmodule Karutte.Inline do
   @moduledoc """
-  `{:inline, max}` ストリームの組み立て機械。純粋関数。
+  The assembler for `{:inline, max}` streams. Pure functions.
 
-  FIN まで貯め、max を超えたら即 reset（per-byte ではなく一塊で渡すための境界）。
-  これが `Karutte.WebTransport` の制御面に開けた穴（inline）の、メモリの蓋。
-  超過は FIN を待たずチャンク到着時点で出る（膨らむ前に止める）。
+  Accumulate until FIN; reset as soon as `max` is exceeded. This is the boundary that lets a
+  stream be delivered whole rather than byte by byte, and it is the memory lid on the one
+  hole (`inline`) that `Karutte.WebTransport` opens in the control plane. Overflow is
+  detected on chunk arrival, without waiting for FIN, so the buffer stops before it swells.
   """
 
   @type t :: {acc :: iodata(), size :: non_neg_integer(), max :: pos_integer()}
@@ -12,7 +13,7 @@ defmodule Karutte.Inline do
   @spec new(pos_integer()) :: t()
   def new(max) when is_integer(max) and max > 0, do: {[], 0, max}
 
-  @doc "一つのチャンク {bin, fin?} を食わせる。"
+  @doc "Feed one chunk, `{bin, fin?}`."
   @spec feed(t(), {binary(), boolean()}) ::
           {:cont, t()} | {:done, binary()} | {:overflow, pos_integer()}
   def feed({acc, size, max}, {bin, fin?}) do
@@ -25,7 +26,7 @@ defmodule Karutte.Inline do
     end
   end
 
-  @doc "チャンク列を最後まで流す補助。"
+  @doc "Helper: run a list of chunks through to the end."
   @spec drive(pos_integer(), [{binary(), boolean()}]) ::
           {:done, binary()} | {:overflow, pos_integer()} | {:cont, t()}
   def drive(max, chunks) do

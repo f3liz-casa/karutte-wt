@@ -1,9 +1,9 @@
 defmodule Karutte.Http3.Listener do
   @moduledoc """
-  quicer のリスナ（UDP ポート）を一つ所有する GenServer。
+  A GenServer that owns one quicer listener (one UDP port).
 
-  監視ツリーの中で「床を開けっ放しにする番人」。init で開き、terminate で閉じる。
-  acceptor たちはここからハンドルをもらって accept する。
+  Its job in the supervision tree is to keep the floor open: it opens the listener in `init`
+  and closes it in `terminate`. The acceptors fetch the handle from here and accept on it.
   """
 
   use GenServer
@@ -11,7 +11,7 @@ defmodule Karutte.Http3.Listener do
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: Keyword.fetch!(opts, :name))
 
-  @doc "リスナのハンドルを取り出す。"
+  @doc "Fetch the listener handle."
   def handle(name), do: GenServer.call(name, :handle)
 
   @impl true
@@ -19,15 +19,17 @@ defmodule Karutte.Http3.Listener do
     Process.flag(:trap_exit, true)
     port = Keyword.fetch!(opts, :port)
 
-    # `:bind` を渡すとそのアドレスだけで待つ（例: WG の "10.9.0.2"）。quicer の listen_on は
-    # port | "IP:Port"。bind 無しなら全 IF。wt-relay の裏では WG だけで待って eth0 直叩きに応えない。
+    # With `:bind`, listen on that one address only (say, a WireGuard address like "10.9.0.2").
+    # quicer's listen_on is `port | "IP:Port"`. Without it, all interfaces. Behind a transparent
+    # relay you bind to the tunnel address so nothing answers on the public interface directly.
     listen_on =
       case Keyword.get(opts, :bind) do
         nil -> port
         ip -> String.to_charlist("#{ip}:#{port}")
       end
 
-    # keep_alive を張ると server 発 keepalive が接続を idle 超で生かす（NAT/relay の conntrack 温存）。
+    # Server-initiated keepalives keep a connection alive past idle (and keep NAT / relay
+    # conntrack entries warm).
     keepalive =
       case Keyword.get(opts, :keep_alive_interval_ms) do
         nil -> []

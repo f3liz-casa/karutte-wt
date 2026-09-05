@@ -1,20 +1,22 @@
 defmodule Karutte.Http3.Connection do
   @moduledoc """
-  HTTP/3 接続を一つ持つ GenServer。WebTransport over HTTP/3 のエンジン。
+  A GenServer that owns one HTTP/3 connection. The engine of WebTransport over HTTP/3.
 
-  この一プロセスが quicer 接続の**唯一の所有者**で、四つを引き受ける:
+  This single process is the **sole owner** of the quicer connection and takes on four jobs:
 
-    1. H3 ハンドシェイク（ローカル control/qpack 3 本 + SETTINGS 交換）を cow_http3_machine で。
-    2. Extended CONNECT（`:protocol = webtransport`）を受けて 200 を返し、WT セッションを確立。
-       そのセッションのために `Karutte.WebTransport.Session` runner を起こす。
-    3. peer の WT ストリーム / datagram を、正規化した `{:quic, …}` 契約で runner へ振る。
-       WT ストリームのバイトは（preface を剥がしたあと）H3 フレームでなく生。
-    4. 床（`Karutte.QuicTransport.Http3`）からの命令メッセージを quicer 呼び出しに落とす。
+    1. The H3 handshake (three local control/qpack streams plus the SETTINGS exchange), via cow_http3_machine.
+    2. Accepting Extended CONNECT (`:protocol = webtransport`), replying 200, and establishing a
+       WebTransport session, starting a `Karutte.WebTransport.Session` runner for it.
+    3. Routing the peer's WebTransport streams and datagrams to the runner under the normalized
+       `{:quic, ...}` contract. WebTransport stream bytes (once the preface is stripped) are raw,
+       not H3 frames.
+    4. Lowering operation messages from the transport (`Karutte.QuicTransport.Http3`) into quicer calls.
 
-  所有を一プロセスに集めることで、quicer ハンドルの affine 性も handoff の競合窓も、
-  この中だけで閉じる。competing window は WT ストリームごとの先着バッファ（`wt_buf`）で。
+  Concentrating ownership in one process means quicer's affine handles and the handoff race
+  window are both settled in here. The race window is closed by a per-stream early-bytes
+  buffer (`wt_buf`).
 
-  cow_http3_machine は数値 stream id で、quicer はハンドルで話すので、両方の対応表を持つ。
+  cow_http3_machine speaks in numeric stream ids and quicer in handles, so both mappings are kept.
   """
 
   use GenServer
@@ -24,7 +26,7 @@ defmodule Karutte.Http3.Connection do
 
   @transport Karutte.QuicTransport.Http3
 
-  # msquic フラグ
+  # msquic flags
   @open_uni 1
   @send_fin 0x4
   @shutdown_graceful 1
@@ -55,17 +57,17 @@ defmodule Karutte.Http3.Connection do
     pending: []
   ]
 
-  # ConnectionSup（DynamicSupervisor）配下の子。接続の死は再起動でなく掃除（temporary）。
+  # A child of ConnectionSup (DynamicSupervisor). A dead connection is cleaned up, not restarted (temporary).
   def child_spec(opts) do
     %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}, restart: :temporary}
   end
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
-  @doc "acceptor が accept 済みの接続を controlling_process で移したあと、これを呼ぶ。handshake から。"
+  @doc "Called by the acceptor after moving an accepted connection here with controlling_process. Starts with the handshake."
   def setup(pid), do: GenServer.cast(pid, :setup)
 
-  @doc "graceful shutdown: H3 GOAWAY を送り、各 WT セッションに DRAIN capsule を配る。"
+  @doc "Graceful shutdown: send H3 GOAWAY and a DRAIN capsule to every WebTransport session."
   def drain(pid), do: GenServer.cast(pid, :drain)
 
   @impl true
@@ -82,8 +84,8 @@ defmodule Karutte.Http3.Connection do
      }}
   end
 
-  # 所有を得たので、まず handshake（自分のプロセスで＝並行かつイベント取りこぼしなし）、
-  # 続けて H3 を立ち上げる。
+  # Now that we own the connection: handshake first (in our own process, so handshakes run
+  # concurrently and no events are lost), then bring up H3.
   @impl true
   def handle_cast(:setup, s) do
     case :quicer.handshake(s.qconn) do
@@ -92,8 +94,8 @@ defmodule Karutte.Http3.Connection do
     end
   end
 
-  # graceful shutdown。新規は受けない合図（GOAWAY）＋各セッションに DRAIN を送る。
-  # 実際に閉じるのは呼び手（Server.drain）が猶予のあとで。
+  # Graceful shutdown: signal "no more new work" (GOAWAY) and send DRAIN to each session.
+  # The actual close is done by the caller (Server.drain) after the grace period.
   def handle_cast(:drain, %{machine: nil} = s), do: {:noreply, s}
 
   def handle_cast(:drain, s) do
@@ -104,19 +106,20 @@ defmodule Karutte.Http3.Connection do
     end
 
     telem([:connection, :drain], %{sessions: map_size(s.sessions)})
-    # 以後、これらのセッションでは新規ストリームを受けない（進行中は生かす）。
+    # From here on these sessions refuse new streams (in-flight ones live on).
     {:noreply, %{s | draining: MapSet.union(s.draining, MapSet.new(Map.keys(s.sessions)))}}
   end
 
-  # GOAWAY フレーム（type 0x07 + 長さ + StreamID varint）。id は「これ以降は処理しない」の境目。
-  # 現在のセッション id の最大 + 4（次に来る bidi）を渡して、進行中は生かし新規は断る。
+  # The GOAWAY frame (type 0x07 + length + StreamID varint). The id marks "nothing past this
+  # is processed". We pass the highest current session id + 4 (the next bidi), so in-flight
+  # sessions live on and new ones are refused.
   defp goaway_frame(s) do
     last = Enum.max([0 | Map.keys(s.sessions)]) + 4
     payload = :cow_http3.encode_int(last)
     [<<0x07>>, :cow_http3.encode_int(:erlang.iolist_size(payload)), payload]
   end
 
-  # --- H3 立ち上げ ---
+  # --- Bringing up H3 ---
 
   defp do_setup(s) do
     {:ok, settings, machine} =
@@ -130,7 +133,7 @@ defmodule Karutte.Http3.Connection do
         max_decode_blocked_streams: 0
       })
 
-    # ローカルの単方向 3 本: control(0x00) / qpack encoder(0x02) / qpack decoder(0x03)。
+    # Three local unidirectional streams: control (0x00) / qpack encoder (0x02) / qpack decoder (0x03).
     {:ok, ctrl} = open_local_unidi(s.qconn)
     {:ok, enc} = open_local_unidi(s.qconn)
     {:ok, dec} = open_local_unidi(s.qconn)
@@ -146,7 +149,7 @@ defmodule Karutte.Http3.Connection do
         machine
       )
 
-    # 以後 peer が開くストリームを受け取り続ける。
+    # Keep receiving the streams the peer opens from now on.
     arm_accept(s.qconn)
     telem([:connection, :start], %{})
 
@@ -156,15 +159,15 @@ defmodule Karutte.Http3.Connection do
       |> learn(enc, :local)
       |> learn(dec, :local)
 
-    # setup より先に届いていた quic メッセージ（フラッシュ分）を再生。
+    # Replay quic messages that arrived before setup (the flushed backlog).
     pending = Enum.reverse(s.pending)
     s = %{s | pending: []}
     Enum.reduce(pending, s, fn msg, acc -> replay(msg, acc) end)
   end
 
-  # --- quicer からのイベント ---
+  # --- Events from quicer ---
 
-  # machine が立つ前（setup 前）に来た quic メッセージは貯めておく（フラッシュ分）。
+  # quic messages that arrive before the machine is up (before setup) are held back.
   @impl true
   def handle_info({:quic, _, _, _} = msg, %{machine: nil} = s),
     do: {:noreply, %{s | pending: [msg | s.pending]}}
@@ -173,11 +176,12 @@ defmodule Karutte.Http3.Connection do
     arm_accept(s.qconn)
     id = sid(qs)
     dir = if Bitwise.band(id, 0x2) == 0, do: :bidi, else: :uni
-    # まず一束だけ受けて preface/種別を読む。種別が決まったら制御系は継続 active に、
-    # WT は demand 駆動（StreamServer が arm するまで passive ＝ QUIC の窓が背圧を持つ）。
+    # Receive one chunk first, to read the preface / stream type. Once the type is known,
+    # control streams go permanently active; WebTransport streams are demand-driven (passive
+    # until the StreamServer arms them, so the QUIC window carries the backpressure).
     :quicer.setopt(qs, :active, :once)
 
-    # 単方向 peer ストリームは型を読む前に machine へ登録が要る。
+    # Peer unidirectional streams must be registered with the machine before their type is read.
     machine =
       if dir == :uni,
         do: :cow_http3_machine.init_unidi_stream(id, :unidi_remote, s.machine),
@@ -186,7 +190,7 @@ defmodule Karutte.Http3.Connection do
     {:noreply, %{s | machine: machine} |> put_id(qs, id) |> put_kind(qs, :pending) |> put_dir(qs, dir)}
   end
 
-  # ストリームデータ or datagram（3 番目が接続ハンドルなら datagram）。
+  # Stream data or a datagram (a datagram if the third element is the connection handle).
   def handle_info({:quic, bin, handle, meta}, s) when is_binary(bin) do
     cond do
       handle == s.qconn -> {:noreply, on_datagram(bin, s)}
@@ -219,7 +223,7 @@ defmodule Karutte.Http3.Connection do
     {:stop, :normal, s}
   end
 
-  # --- 床（Karutte.QuicTransport.Http3）からの命令 ---
+  # --- Operations from the transport (Karutte.QuicTransport.Http3) ---
 
   def handle_info({:set_owner, qs, pid}, s), do: {:noreply, hand_off(s, qs, pid)}
 
@@ -245,7 +249,7 @@ defmodule Karutte.Http3.Connection do
     {:noreply, s}
   end
 
-  # 床の close/2 ＝ その WT セッションだけ閉じる（QUIC 接続は他セッションのため生かす）。
+  # The transport's close/2: close just that WebTransport session (the QUIC connection stays up for the others).
   def handle_info({:close_session, sid, code}, s) do
     case Map.get(s.sess_qs, sid) do
       nil -> :ok
@@ -255,8 +259,8 @@ defmodule Karutte.Http3.Connection do
     {:noreply, close_session(s, sid)}
   end
 
-  # link した子が落ちたときの後始末。Session runner ならそのセッションを掃除、
-  # server 発ストリームの StreamServer なら、異常終了ならそのストリームを reset。
+  # Cleanup when a linked child dies. A Session runner: clean up that session. A StreamServer
+  # for a server-initiated stream: reset the stream if the exit was abnormal.
   def handle_info({:EXIT, pid, reason}, s) do
     cond do
       (sid = Enum.find_value(s.sessions, fn {id, p} -> p == pid && id end)) != nil ->
@@ -277,13 +281,13 @@ defmodule Karutte.Http3.Connection do
   end
 
   def handle_info(other, s) do
-    Logger.debug("Http3.Connection 未処理: #{inspect(other)}")
+    Logger.debug("Http3.Connection unhandled: #{inspect(other)}")
     {:noreply, s}
   end
 
   @impl true
   def terminate(_reason, %{qconn: qconn} = s) when qconn != nil do
-    # セッション runner は link で連れて落ちる。QUIC 接続だけ明示的に閉じる。
+    # Session runners go down with us through the link. Only the QUIC connection is closed explicitly.
     telem([:connection, :stop], %{sessions: map_size(s.sessions)})
     :quicer.async_shutdown_connection(qconn, 0, 0)
     :ok
@@ -294,12 +298,12 @@ defmodule Karutte.Http3.Connection do
   @impl true
   def handle_call({:open_stream, dir, sid, opts}, _from, s) do
     flag = if dir == :uni, do: @open_uni, else: 0
-    # cowlib は方向を :unidi / :bidi で表す（こちらの :uni / :bidi と綴りが違う）。
+    # cowlib spells direction :unidi / :bidi (ours is :uni / :bidi).
     wt_dir = if dir == :uni, do: :unidi, else: :bidi
     {:ok, qs} = :quicer.start_stream(s.qconn, %{open_flag: flag, active: true})
     :quicer.send(qs, :cow_http3.webtransport_stream_header(sid, wt_dir))
 
-    # server 発ストリームも become の前に machine 登録が要る（uni は local unidi）。
+    # Server-initiated streams must also be registered with the machine before become (uni as local unidi).
     machine =
       case dir do
         :uni -> :cow_http3_machine.init_unidi_stream(sid(qs), :unidi_local, s.machine)
@@ -315,8 +319,9 @@ defmodule Karutte.Http3.Connection do
       |> put_dir(qs, dir)
       |> put_wt_sess(qs, sid)
 
-    # handler が指定されたら（server 発 bidi の read 用）、この Connection が StreamServer を
-    # 起こして owner にする。受信は既存の route_wt で流れ、handoff は空バッファで即完了。
+    # If a handler is given (to read a server-initiated bidi), this Connection starts the
+    # StreamServer and makes it the owner. Receives flow through the existing route_wt, and
+    # the handoff completes immediately with an empty buffer.
     s =
       case Keyword.get(opts, :handler) do
         nil ->
@@ -338,7 +343,7 @@ defmodule Karutte.Http3.Connection do
     {:reply, {:ok, h3s(s, qs)}, s}
   end
 
-  # ================= 受信の中身 =================
+  # ================= Receiving =================
 
   defp on_stream_data(qs, bin, fin, s) do
     case Map.get(s.kinds, qs) do
@@ -352,7 +357,7 @@ defmodule Karutte.Http3.Connection do
     end
   end
 
-  # まだ種別不明の新ストリーム: 先頭を見て振り分ける。
+  # A new stream of unknown type yet: look at its head and dispatch.
   defp classify(s, qs, bin, fin) do
     buf = Map.get(s.bufs, qs, <<>>) <> bin
 
@@ -366,7 +371,7 @@ defmodule Karutte.Http3.Connection do
     case :cow_http3.parse_unidi_stream_header(buf) do
       {:ok, type, rest} when type in [:control, :encoder, :decoder] ->
         {:ok, machine} = :cow_http3_machine.set_unidi_remote_stream_type(sid(qs), type, s.machine)
-        # 内部の制御系は継続して読む（低流量・背圧の対象外）。
+        # Internal control streams are read continuously (low volume, not subject to backpressure).
         :quicer.setopt(qs, :active, true)
         s = %{s | machine: machine} |> put_kind(qs, type) |> clear_buf(qs)
         on_stream_data(qs, rest, fin, s)
@@ -376,7 +381,7 @@ defmodule Karutte.Http3.Connection do
         route_wt(s, qs, rest, fin)
 
       {:undefined, _rest} ->
-        # 知らない単方向ストリーム。捨てる（reset まではしない）。
+        # An unknown unidirectional stream. Ignore it (without going as far as a reset).
         put_kind(s, qs, :ignore)
 
       :more ->
@@ -387,14 +392,14 @@ defmodule Karutte.Http3.Connection do
   defp classify_bidi(s, qs, buf, fin) do
     case :cow_http3.parse(buf) do
       {:webtransport_stream_header, session_id, rest} ->
-        # WT bidi も become_webtransport_stream の前に bidi として machine 登録が要る。
+        # A WebTransport bidi must also be registered with the machine as bidi before become_webtransport_stream.
         machine = :cow_http3_machine.init_bidi_stream(sid(qs), s.machine)
         s = start_wt_stream(%{s | machine: machine}, qs, session_id, :bidi)
         route_wt(s, qs, rest, fin)
 
       _ ->
-        # H3 リクエストストリーム。machine に登録してフレームを食わせる。
-        # CONNECT とその後のセッション capsule を継続して読む。
+        # An H3 request stream. Register it with the machine and feed it frames.
+        # Read continuously: the CONNECT and, afterwards, the session capsules.
         :quicer.setopt(qs, :active, true)
         machine = :cow_http3_machine.init_bidi_stream(sid(qs), s.machine)
         s = %{s | machine: machine} |> put_kind(qs, :request) |> clear_buf(qs)
@@ -402,17 +407,17 @@ defmodule Karutte.Http3.Connection do
     end
   end
 
-  # 制御ストリーム: H3 フレーム（SETTINGS 等）を machine へ。
+  # The control stream: H3 frames (SETTINGS etc.) go to the machine.
   defp feed_control(s, qs, bin, fin) do
     drive_frames(s, qs, bin, fin)
   end
 
-  # リクエストストリーム: HEADERS を見て CONNECT(webtransport) を捌く。
+  # A request stream: look at HEADERS and handle CONNECT (webtransport).
   defp feed_request(s, qs, bin, fin) do
     drive_frames(s, qs, bin, fin)
   end
 
-  # control/request 共通: バッファに足してフレームを順に machine へ。
+  # Shared by control/request: append to the buffer and feed frames to the machine in order.
   defp drive_frames(s, qs, bin, fin) do
     buf = Map.get(s.bufs, qs, <<>>) <> bin
     do_frames(s, qs, buf, fin)
@@ -426,9 +431,9 @@ defmodule Karutte.Http3.Connection do
         s = apply_frame(s, qs, frame, last?)
 
         cond do
-          # CONNECT が通ってこの bidi が WT セッションストリームになったら、以後の
-          # バイトは H3 フレームでなくセッションの capsule。machine.frame に食わせると
-          # cowlib が落ちる（wt_session に data_frame）。ここで止めて捨てる。
+          # Once CONNECT is accepted and this bidi has become a WebTransport session stream,
+          # the bytes that follow are session capsules, not H3 frames. Feeding them to
+          # machine.frame crashes cowlib (data_frame on a wt_session). Stop here and drop them.
           prev == :request and Map.get(s.kinds, qs) == :session ->
             clear_buf(s, qs)
 
@@ -449,7 +454,7 @@ defmodule Karutte.Http3.Connection do
         do_frames(s, qs, rest, fin)
 
       {:webtransport_stream_header, session_id, rest} ->
-        # 念のため（bidi WT がここに来たら）。
+        # Just in case a bidi WebTransport stream ends up here.
         s = start_wt_stream(put_kind(s, qs, :wt), qs, session_id, :bidi)
         route_wt(clear_buf(s, qs), qs, rest, fin)
 
@@ -473,7 +478,7 @@ defmodule Karutte.Http3.Connection do
         on_request_headers(s, qs, pseudo, headers)
 
       {:ok, {:data, _data}, machine} ->
-        # リクエストボディ。WT には使わない。
+        # A request body. Not used by WebTransport.
         %{s | machine: machine}
 
       {:ok, _other, machine} ->
@@ -492,16 +497,16 @@ defmodule Karutte.Http3.Connection do
     end
   end
 
-  # CONNECT(webtransport) を受けたら、ハンドラに諮って 200 か 4xx を返す。
+  # On CONNECT (webtransport), consult the handler and reply 200 or 4xx.
   defp on_request_headers(s, qs, pseudo, headers) do
     cond do
       pseudo[:method] != "CONNECT" or pseudo[:protocol] != "webtransport" ->
-        # WT 以外は 404 で締める。
+        # Anything but WebTransport gets a 404.
         reject(s, qs, 404)
 
       map_size(s.sessions) >= s.max_sessions ->
-        # セッション上限。503 で断る（接続自体は生かす）。
-        Logger.info("WT セッション上限 (#{s.max_sessions}) 到達、CONNECT を拒否")
+        # Session limit. Refuse with 503 (the connection itself stays up).
+        Logger.info("WebTransport session limit (#{s.max_sessions}) reached, refusing CONNECT")
         reject(s, qs, 503)
 
       true ->
@@ -515,8 +520,8 @@ defmodule Karutte.Http3.Connection do
     s
   end
 
-  # request 情報（path/authority/headers）をハンドラの門番 authorize/1 に諮り、
-  # :ok なら 200 でセッションを起こす。{:reject, status} なら断る（認証・ルーティング）。
+  # Put the request (path/authority/headers) to the handler's authorize/1 gate. On :ok, reply
+  # 200 and start the session. On {:reject, status}, refuse (authentication, routing).
   defp accept_webtransport(s, qs, pseudo, headers) do
     id = sid(qs)
     conn = {:h3c, self(), s.qconn, id}
@@ -529,8 +534,9 @@ defmodule Karutte.Http3.Connection do
       path: pseudo[:path],
       authority: pseudo[:authority],
       headers: headers,
-      # QUIC peer アドレス。透過(A)モードの wt-relay 裏では、これが実クライアント IP。
-      # authorize/1・レート制限・ログ・telemetry 相関に使える。SNAT モードでは relay の WG:port。
+      # The QUIC peer address. Behind a transparent relay this is the real client IP; behind
+      # a SNAT relay it is the relay's address. Useful for authorize/1, rate limiting, logs,
+      # and telemetry correlation.
       peer: peer
     }
 
@@ -545,11 +551,11 @@ defmodule Karutte.Http3.Connection do
             conn_info: conn_info
           )
 
-        # 200 は stream がまだ bidi のうちに返す（そのあと wt_session 化する）。
+        # Reply 200 while the stream is still a bidi (it becomes a wt_session right after).
         s = respond(s, qs, 200, false)
         machine = :cow_http3_machine.become_webtransport_session(id, s.machine)
         telem([:session, :open], %{session_id: id, path: pseudo[:path], peer: peer})
-        # セッションが立った合図。ここから先はハンドラが server 発ストリームを開ける。
+        # The session is up. From here the handler may open server-initiated streams.
         Kernel.send(pid, :wt_ready)
 
         %{s | machine: machine, sessions: Map.put(s.sessions, id, pid), sess_qs: Map.put(s.sess_qs, id, qs)}
@@ -576,7 +582,7 @@ defmodule Karutte.Http3.Connection do
     s
   end
 
-  # qpack encoder/decoder ストリームのバイト。
+  # Bytes on the qpack encoder/decoder streams.
   defp feed_qpack(s, qs, bin, fin) do
     finatom = if fin, do: :fin, else: :nofin
 
@@ -588,7 +594,7 @@ defmodule Karutte.Http3.Connection do
     end
   end
 
-  # machine が返す qpack 命令を、対応するローカルストリームへ書き戻す。
+  # Write the qpack instructions the machine returns back to the matching local stream.
   defp flush_instr(s, :undefined), do: s
   defp flush_instr(s, {:decoder_instructions, data}) do
     :quicer.send(s.dec_qs, data)
@@ -599,11 +605,11 @@ defmodule Karutte.Http3.Connection do
     s
   end
 
-  # ================= WebTransport ストリーム =================
+  # ================= WebTransport streams =================
 
   defp start_wt_stream(s, qs, session_id, dir) do
     if MapSet.member?(s.draining, session_id) do
-      # ドレイン中のセッションでは新規ストリームを断る（両方向 reset）。
+      # A draining session refuses new streams (reset in both directions).
       :quicer.async_shutdown_stream(qs, @shutdown_abort_send + @shutdown_abort_receive, 0)
       telem([:stream, :refused], %{session_id: session_id})
       drop_stream(s, qs)
@@ -622,7 +628,7 @@ defmodule Karutte.Http3.Connection do
       |> put_wt_sess(qs, session_id)
       |> clear_buf(qs)
 
-    # 属する WT セッションの runner へ new_stream を通知。所有が決まるまでバイトはバッファ。
+    # Notify the owning session's runner of the new stream. Bytes are buffered until an owner is decided.
     case Map.get(s.sessions, session_id) do
       nil ->
         :ok
@@ -634,7 +640,7 @@ defmodule Karutte.Http3.Connection do
     Map.update!(s, :wt_buf, &Map.put_new(&1, qs, []))
   end
 
-  # WT ストリームの生バイト: 所有者がいれば転送、いなければバッファ。
+  # Raw WebTransport stream bytes: forward if there is an owner, otherwise buffer.
   defp route_wt(s, _qs, <<>>, false), do: s
 
   defp route_wt(s, qs, bin, fin) do
@@ -650,7 +656,7 @@ defmodule Karutte.Http3.Connection do
     end
   end
 
-  # control/2 由来。先着バッファを handoff_done で渡し、以後 live を pid へ。
+  # From control/2. Hand the early-bytes buffer over as handoff_done, then route live traffic to pid.
   defp hand_off(s, qs, pid) do
     buffered =
       s.wt_buf
@@ -661,10 +667,10 @@ defmodule Karutte.Http3.Connection do
     %{s | wt_owner: Map.put(s.wt_owner, qs, pid), wt_buf: Map.delete(s.wt_buf, qs)}
   end
 
-  # ================= セッションストリームの capsule =================
+  # ================= Capsules on the session stream =================
 
-  # CONNECT が通った後、セッションストリームは Capsule Protocol を運ぶ（RFC 9297）。
-  # CLOSE / DRAIN を拾う。session_id はこのストリーム id そのもの。
+  # After CONNECT is accepted, the session stream carries the Capsule Protocol (RFC 9297).
+  # We pick up CLOSE / DRAIN. The session_id is this stream's id.
   defp feed_session(s, qs, bin, fin) do
     sid = sid(qs)
     {bin, s} = apply_skip(s, qs, bin)
@@ -679,12 +685,12 @@ defmodule Karutte.Http3.Connection do
         close_session(clear_buf(s, qs), sid)
 
       {:ok, :wt_drain_session, rest} ->
-        # peer からのドレイン要求。このセッションは新規ストリームを受けない（進行中は生かす）。
+        # A drain request from the peer. This session takes no new streams (in-flight ones live on).
         telem([:session, :drain], %{session_id: sid})
         parse_capsules(%{s | draining: MapSet.put(s.draining, sid)}, qs, sid, rest)
 
       {:ok, rest} ->
-        # 知らない capsule は飛ばして続ける。
+        # Skip unknown capsules and keep going.
         parse_capsules(s, qs, sid, rest)
 
       {:skip, n} ->
@@ -699,7 +705,7 @@ defmodule Karutte.Http3.Connection do
     end
   end
 
-  # 前の capsule で「あと n バイト読み飛ばす」と決めていた分を消費。
+  # Consume the "skip n more bytes" decided by an earlier capsule.
   defp apply_skip(s, qs, bin) do
     case Map.get(s.skip, qs, 0) do
       0 ->
@@ -714,8 +720,8 @@ defmodule Karutte.Http3.Connection do
     end
   end
 
-  # WT セッションを掃除する。runner を止め（紐づく StreamServer も連れて落ちる）、
-  # machine から wt_session と配下の wt_stream を消す。QUIC 接続は触らない。
+  # Clean up a WebTransport session. Stop the runner (its StreamServers go with it) and remove
+  # the wt_session and its wt_streams from the machine. The QUIC connection is untouched.
   defp close_session(s, session_id) do
     case Map.get(s.sessions, session_id) do
       nil -> s
@@ -723,8 +729,9 @@ defmodule Karutte.Http3.Connection do
     end
   end
 
-  # マップと machine からセッションを除く（runner は既に止まっている/別経路で止める前提）。
-  # cow_http3_machine.close_webtransport_session は二重呼びで例外なので一度だけ。
+  # Remove a session from the maps and the machine (the runner is assumed already stopped, or
+  # stopped elsewhere). cow_http3_machine.close_webtransport_session raises on a double call,
+  # so exactly once.
   defp forget_session(s, session_id) do
     if Map.has_key?(s.sessions, session_id) do
       telem([:session, :close], %{session_id: session_id})
@@ -746,8 +753,8 @@ defmodule Karutte.Http3.Connection do
 
   # ================= datagram =================
 
-  # datagram は軸の外（RFC 9221）＝フロー制御なし。過負荷なら drop、決してブロックしない。
-  # セッション runner のメールボックスが上限を超えていたら落とす（有界キュー→drop）。
+  # Datagrams are off-axis (RFC 9221): no flow control. Under overload, drop; never block.
+  # If the session runner's mailbox is over the limit, the datagram is dropped (bounded queue → drop).
   defp on_datagram(bin, s) do
     {session_id, payload} = :cow_http3.parse_datagram(bin)
 
@@ -775,7 +782,7 @@ defmodule Karutte.Http3.Connection do
 
   defp telem(event, meta), do: :telemetry.execute([:karutte, :http3 | event], %{count: 1}, meta)
 
-  # ================= 小道具 =================
+  # ================= Helpers =================
 
   defp replay(msg, s) do
     {:noreply, s2} = handle_info(msg, s)
@@ -791,7 +798,7 @@ defmodule Karutte.Http3.Connection do
     id
   end
 
-  # QUIC 接続の peer アドレス（{ip, port}）。取れなければ nil。
+  # The QUIC connection's peer address ({ip, port}), or nil if unavailable.
   defp peer_addr(qconn) do
     case :quicer.peername(qconn) do
       {:ok, addr} -> addr
@@ -830,7 +837,7 @@ defmodule Karutte.Http3.Connection do
     }
   end
 
-  # WT ストリームの宛先: 所有者がいればそこへ、いなければ属するセッションの runner へ。
+  # Where a WebTransport stream message goes: its owner if any, else the runner of its session.
   defp forward(s, qs, msg) do
     pid = Map.get(s.wt_owner, qs) || Map.get(s.sessions, Map.get(s.wt_sess, qs))
     if pid, do: Kernel.send(pid, msg)

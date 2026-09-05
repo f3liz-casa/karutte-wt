@@ -9,6 +9,19 @@ defmodule Karutte.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       name: "karutte-core",
+      source_url: "https://github.com/f3liz-casa/karutte-core",
+      docs: [
+        main: "readme",
+        extras: ["README.md", "docs/design.md", "docs/research-notes.md", "docs/references.md"],
+        groups_for_modules: [
+          Server: [Karutte.Http3.Server, Karutte.Http3.Cert, Karutte.Http3.Echo, Karutte.Http3.Echo.Stream],
+          Behaviours: [Karutte.WebTransport, Karutte.WebTransport.Stream, Karutte.QuicTransport],
+          Runners: [Karutte.WebTransport.Session, Karutte.WebTransport.StreamServer, Karutte.WebTransport.Handoff],
+          Transports: [Karutte.QuicTransport.Http3, Karutte.QuicTransport.Quicer, Karutte.QuicTransport.Http2],
+          Wire: [Karutte.Varint, Karutte.Capsule, Karutte.Inline],
+          Internals: [Karutte.Http3.Connection, Karutte.Http3.Listener, Karutte.Http3.Acceptor, Karutte.WebTransportAdapter]
+        ]
+      ],
       description:
         "WebTransport over HTTP/3 for Elixir, on quicer and cowlib. Layered behaviours, one process per stream, works with real browsers."
     ]
@@ -20,16 +33,18 @@ defmodule Karutte.MixProject do
 
   defp deps do
     [
-      # L1 の本物の床（msquic NIF）。ビルドに cmake / ninja / OpenSSL のツールチェーンが要る。
+      # The real L1 (msquic NIF). Building it needs a cmake / ninja / OpenSSL toolchain.
       {:quicer, "~> 0.1"},
-      # HTTP/3 と QPACK の重い所（フレーム解析・Huffman・静的表）は cowlib に任せる。
-      # karutte-wt 側は WebTransport 固有の部分（Extended CONNECT / WT framing / datagram /
-      # runner 配線）だけを書く。
+      # The heavy parts of HTTP/3 and QPACK (frame parsing, Huffman, static tables) are left
+      # to cowlib. karutte only writes the WebTransport-specific parts (Extended CONNECT,
+      # WT framing, datagrams, runner wiring).
       {:cowlib, "~> 2.17"},
-      # 観測（接続/セッション/datagram drop 等のイベント）。
+      # Observability (connection / session / datagram-drop events).
       {:telemetry, "~> 1.2"},
-      # L2 の縫い目。Plug.Conn.upgrade_adapter/3（WebSock と同じ脱出口）に乗るため。
-      {:plug, "~> 1.16"}
+      # The L2 seam: to ride Plug.Conn.upgrade_adapter/3 (the same escape hatch WebSock uses).
+      {:plug, "~> 1.16"},
+      # Docs only.
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end
 end

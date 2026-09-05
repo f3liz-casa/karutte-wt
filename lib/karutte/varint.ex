@@ -1,25 +1,24 @@
 defmodule Karutte.Varint do
   @moduledoc """
-  QUIC の可変長整数（RFC 9000 §16）。純粋。
+  QUIC variable-length integers (RFC 9000 §16). Pure.
 
-  先頭バイトの上位 2 ビットが長さの級を決める:
+  The top two bits of the first byte pick the length class:
 
-      00 → 1 バイト（6 ビット値、0..63）
-      01 → 2 バイト（14 ビット）
-      10 → 4 バイト（30 ビット）
-      11 → 8 バイト（62 ビット）
+      00 → 1 byte  (6-bit value, 0..63)
+      01 → 2 bytes (14 bits)
+      10 → 4 bytes (30 bits)
+      11 → 8 bytes (62 bits)
 
-  なぜここに居るか。HTTP/3 でも HTTP/2 でも、WebTransport のワイヤは
-  この varint を土台にする — session id（CONNECT ストリームの id）も、
-  Capsule の type/length（RFC 9297）も、みんなこれで前置きされる。
-  だから二つのバインディングが分かれる前の、共有の床。
+  Why it lives here: on both HTTP/3 and HTTP/2, the WebTransport wire format is built on this
+  varint. The session id (the CONNECT stream's id) and the type/length of every Capsule
+  (RFC 9297) are all prefixed with it. So it is the shared floor beneath both bindings.
 
-  出典: <https://datatracker.ietf.org/doc/html/rfc9000#section-16>
+  Source: <https://datatracker.ietf.org/doc/html/rfc9000#section-16>
   """
 
   @max 4_611_686_018_427_387_903
 
-  @doc "非負整数を最短の級でエンコードする。"
+  @doc "Encode a non-negative integer in the shortest class that fits."
   @spec encode(non_neg_integer()) :: binary()
   def encode(v) when is_integer(v) and v >= 0 and v <= 63, do: <<0::2, v::6>>
   def encode(v) when is_integer(v) and v <= 16_383, do: <<1::2, v::14>>
@@ -27,10 +26,11 @@ defmodule Karutte.Varint do
   def encode(v) when is_integer(v) and v <= @max, do: <<3::2, v::62>>
 
   @doc """
-  先頭の varint を一つ読む。`{:ok, value, rest}` か、まだバイトが足りなければ `:more`。
+  Read one varint from the front. Returns `{:ok, value, rest}`, or `:more` if there are not
+  enough bytes yet.
 
-  varint は壊れようがない（級が決まれば必要なバイト数も決まる）ので、失敗は
-  「足りない」だけ。`:error` は無い。
+  A varint cannot be malformed (once the class is known, so is the byte count), so the only
+  failure is "not enough". There is no `:error`.
   """
   @spec decode(binary()) :: {:ok, non_neg_integer(), binary()} | :more
   def decode(<<0::2, v::6, rest::binary>>), do: {:ok, v, rest}

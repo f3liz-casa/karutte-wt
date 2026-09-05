@@ -1,31 +1,32 @@
 defmodule Karutte.Http3.Echo do
   @moduledoc """
-  例 ＝ いちばん素朴な WebTransport ハンドラ。受けたものを、そのまま返す。
+  The example: the simplest possible WebTransport handler. Whatever arrives is sent back.
 
-  二つの面を持つ:
+  It has two faces:
 
-    * `Karutte.WebTransport`（このモジュール）… セッションの制御面。
-      peer が開いたストリームは `Echo.Stream` に任せ、datagram は折り返す。
-    * `Karutte.Http3.Echo.Stream`（下のネスト）… ストリームのデータ面。
-      届いたバイトをそのまま push し、FIN を見たら書き側も閉じる。
+    * `Karutte.WebTransport` (this module): the session's control plane. Every stream the
+      peer opens is handed to `Echo.Stream`; datagrams are bounced straight back.
+    * `Karutte.Http3.Echo.Stream` (nested below): the stream's data plane. Bytes are pushed
+      back as they arrive, and on FIN the write side is closed too.
 
-  datagram を折り返すには「送る口」が要る。behaviour の `handle_datagram/2` は
-  返り値で送れない（軸の外で push を持たない）ので、`init/2` の `conn_info` から
-  床と接続ハンドルを受け取って state にしまっておき、そこから送り返す。
+  Bouncing a datagram needs somewhere to send it from. The behaviour's `handle_datagram/2`
+  cannot send through its return value (datagrams are off-axis and have no push), so the
+  transport and connection handle are taken from `conn_info` in `init/2`, kept in state, and
+  used from there.
   """
 
   @behaviour Karutte.WebTransport
 
   @impl true
   def init(_arg, conn_info) do
-    # conn_info に床（transport）と接続ハンドル（conn）が入っている前提。
-    # datagram の折り返しはこの二つが要る。
+    # conn_info carries the transport and the connection handle.
+    # Both are needed to bounce datagrams.
     {:ok, %{transport: conn_info.transport, conn: conn_info.conn}}
   end
 
   @impl true
   def handle_stream(_stream, _dir, state) do
-    # どのストリームも echo に任せる（長命オーナーを立てる）。
+    # Every stream gets its own long-lived echo owner.
     {{:handler, __MODULE__.Stream, nil}, state}
   end
 
@@ -39,7 +40,7 @@ defmodule Karutte.Http3.Echo do
   def terminate(_reason, _state), do: :ok
 
   defmodule Stream do
-    @moduledoc "echo のデータ面。届いたバイトを返し、FIN で書き側を閉じる。"
+    @moduledoc "The echo data plane. Returns each byte it receives; closes the write side on FIN."
 
     @behaviour Karutte.WebTransport.Stream
 
