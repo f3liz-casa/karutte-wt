@@ -83,9 +83,9 @@ HTTP/3 サーバ機構（`Karutte.Http3.*`）— 監視ツリーひと組:
 - **認証・ルーティング**: CONNECT の `:path` / `:authority` / ヘッダ / `:peer`（QUIC peer アドレス）を
   `conn_info` でハンドラに渡す。任意の `authorize/1` 門番で `:ok` / `{:reject, status}` を返せる
   （path やトークン・IP で受理/拒否）。受理のときだけ 200、拒否は指定 status で断る。
-- **wt-relay 連携（透過 L4 リレー裏で動く）**: `:bind`（WG アドレスだけで待つ）、`:keep_alive_interval_ms`
-  （relay の conntrack 温存）、`conn_info.peer`（透過モードでは実クライアント IP）。詳細は
-  [`wt-relay-integration.md`](wt-relay-integration.md)。
+- **透過 L4 リレーの裏で動くための口**: `:bind`（特定アドレスだけで待つ）、`:keep_alive_interval_ms`
+  （relay の conntrack 温存）、`conn_info.peer`（透過モードでは実クライアント IP）。リレー側の設計と
+  連携メモは姉妹リポジトリ karutte-sukhi に。
 - **server push / server 発ストリーム**: セッションが立つと handler に `:wt_ready` が届く。そこで
   `transport.open_stream(conn, :uni)` で単方向 push、`open_stream(conn, :bidi, handler: Mod, init_arg: a)`
   で **双方向ストリーム**（L4 runner 付きで読み書き）を server から開ける。
@@ -104,19 +104,6 @@ HTTP/3 サーバ機構（`Karutte.Http3.*`）— 監視ツリーひと組:
 - `Karutte.Inline` — 短命ストリームを一塊で渡すための組み立て機械（メモリの蓋）
 - `Karutte.Varint` / `Karutte.Capsule` — ワイヤの土台（RFC 9000 §16 / RFC 9297）。HTTP/2 の床が使う。
 
-### エッジとして駆動する — イベントバスを WebTransport へ（応用）
-
-`Karutte.Http3.Echo` の代わりに、外のイベントを WT へ流すハンドラを差せる。付属の例:
-
-- `Karutte.Ticket` — 入場チケットの検証。別サーバが Ed25519 で署名した短命トークンを、karutte が
-  **公開鍵だけでローカル検証**する（接続ごとに問い合わせない＝暗号の直後に安く弾ける）。
-- `Karutte.Bridge` — WebTransport ハンドラの例。`authorize/1` で `?ticket=` を検札 → **feed ごとに
-  NATS を購読し、1 feed = 1 uni ストリーム**で流す。騒がしい feed が静かな feed を待たせない
-  （ストリーム独立の flow control）。
-
-fedi サーバ（sukhi）の live タイムラインを、Cloudflare の裏／使い捨ての最前線から配るための応用。
-経路（透過 L4 リレー・実 IP 保存・秘匿・flood 対策）は [`wt-relay-integration.md`](wt-relay-integration.md)
-と [`../wt-relay/`](../wt-relay/) に。
 
 ## 背圧は三軸で、重ならない
 
@@ -172,8 +159,6 @@ datagram echo（"ping"→"ping"）が通った。サーバは一連のやり取�
 - `test/l2_test.exs` — runner が床に依らず L3/L4 を回す（偽の床で end-to-end）:
   new_stream → handoff → echo、demand が床へ、FIN で半閉じ、inline の組み立てと overflow reset、
   reset 処分、datagram の制御面分配
-- `test/ticket_test.exs` — Ed25519 入場チケットの検証（正当は通し、期限切れ・改竄・別鍵は弾く）
-- `test/bridge_test.exs` — feed→subject の割り当てと、NATS event をその feed の stream へ流す配線
 
 behaviour 群はコンパイルが通り、跨りの型（`QuicTransport.stream()` 等）も解決する。
 

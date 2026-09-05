@@ -1,26 +1,18 @@
-# karutte-wt
+# karutte-core
 
 WebTransport を BEAM（Elixir）に素直に住まわせるための、層になった behaviour ＋その実体。
 最初は「屋根（上の抽象）だけ先に確かめる素描」だったが、いまは **いちばん下の QUIC 層まで
 接いで、本物のブラウザ（Chrome）と WebTransport over HTTP/3 で喋れる**ところまで来ている。
 quicer（QUIC）＋ cowlib（H3/QPACK）の上に、WebTransport 固有の部分と runner を載せた。
 
-## この repo の構成（monorepo）
-
-- **ルート** … karutte（WebTransport サーバ本体）。
-- **`wt-relay/`** … 透過 L4 リレー／L4 テレメトリの「庭師」（**別ランタイム・別コンテナ**の姉妹
-  プロジェクト）。karutte を Cloudflare の裏や使い捨ての最前線に置くときの下回りで、netfilter を
-  宣言的に維持しつつ暗号の手前で flood を数える。ランタイムを分けているのは意図的で、
-  「観測者は観測対象より長生きすべき」「netfilter 権限を最前線プロセスに渡さない」から。
-  設計は [`wt-relay/docs/edge-design.md`](wt-relay/docs/edge-design.md)。
+これは WebTransport サーバの芯だけ。fedi 向けの応用（Ed25519 チケット・NATS 橋・L4 リレー）は
+姉妹リポジトリ **karutte-sukhi** に分けてある。
 
 ## いま出来ていること
 
 - **実 QUIC で end-to-end**、本物のブラウザ（Chrome 149）で WebTransport over HTTP/3 が通る（`mix test` 69 passed）。
 - 1 つの H3 接続に**複数の WT セッション**、**背圧は三軸で重ならない**、**ストリーム単位のクラッシュ隔離**。
 - **server push**（uni/bidi）、**graceful drain**、`authorize/1` の門番、`[:karutte, :http3, …]` telemetry。
-- **エッジ応用**: Ed25519 チケット検証（`Karutte.Ticket`）＋ NATS→WT 橋（`Karutte.Bridge`）で、fedi サーバの
-  live タイムラインを使い捨ての最前線から配る。
 
 なぜこれが今まで無かったか・層モデル・背圧の三軸・検証の全部・正直なほつれは
 **[`docs/design.md`](docs/design.md)** に。
@@ -76,8 +68,6 @@ const w = s.writable.getWriter(); await w.write(new TextEncoder().encode("hi"));
 ## ドキュメント
 
 - [`docs/design.md`](docs/design.md) — なぜ無いか / 層モデル / 背圧の三軸 / 確かめたこと全部 / 正直なほつれ。
-- [`docs/wt-relay-integration.md`](docs/wt-relay-integration.md) — エッジ経路（透過 L4・実 IP 保存・秘匿・flood）の karutte 側。
-- [`wt-relay/`](wt-relay/) — L4 リレー／テレメトリの庭師（別ランタイム）。設計は `wt-relay/docs/edge-design.md`。
 - [`docs/research-notes.md`](docs/research-notes.md) — 知ったことを推論の順に。
 - [`docs/references.md`](docs/references.md) — 確かめた事実と出典のカード（quicer API、RFC、drafts）。
 

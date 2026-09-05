@@ -1,4 +1,4 @@
-# karutte-wt を走らせる箱。quicer(msquic) をソースからビルドするので、
+# karutte-core を走らせる箱。quicer(msquic) をソースからビルドするので、
 # cmake / build-essential / perl(openssl) が要る。単一ステージ（origin の spike なので素直に）。
 FROM hexpm/elixir:1.17.3-erlang-27.1.2-ubuntu-jammy-20260509
 
@@ -20,5 +20,5 @@ COPY test test
 RUN mix compile
 COPY run.exs ./
 
-# 既定は echo サーバを上げる。WT_BIND / WT_PORT で listen 先を差し替え。
+# echo サーバを上げる。WT_BIND / WT_PORT で listen 先を差し替え。
 CMD ["sh", "-c", "mix run --no-halt run.exs"]

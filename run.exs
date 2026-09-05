@@ -19,36 +19,12 @@ bind = System.get_env("WT_BIND")
       {cert.certfile, cert.keyfile}
   end
 
-# handler の選択: WT_TICKET_PUBKEY があれば **Bridge 稼働**（sukhi の NATS を消費して
-# WebTransport へ橋渡し）、無ければ echo（ローカル検証・spike）。
-handler =
-  case System.get_env("WT_TICKET_PUBKEY") do
-    k when is_binary(k) ->
-      Application.put_env(:karutte_wt, :ticket_pubkey, Base.decode64!(k))
-      Application.put_env(:karutte_wt, :gnat, :gnat)
-      nats_host = System.get_env("NATS_HOST", "10.9.0.2")
-      nats_port = String.to_integer(System.get_env("NATS_PORT", "4222"))
-      # sukhi と同型の自動再接続つき接続を :gnat で。
-      {:ok, _} =
-        Gnat.ConnectionSupervisor.start_link(%{
-          name: :gnat,
-          connection_settings: [%{host: String.to_charlist(nats_host), port: nats_port}]
-        })
-
-      IO.puts("mode: bridge (NATS #{nats_host}:#{nats_port})")
-      Karutte.Bridge
-
-    _ ->
-      IO.puts("mode: echo")
-      Karutte.Http3.Echo
-  end
-
 opts =
   [
     port: port,
     certfile: certfile,
     keyfile: keyfile,
-    handler: handler,
+    handler: Karutte.Http3.Echo,
     keep_alive_interval_ms: 15_000,
     # flood 向けに既定より締める（x64 は小さい箱・最前線）。env で上書き可。
     max_connections: env.("WT_MAX_CONNECTIONS", "2000"),
