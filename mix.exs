@@ -1,16 +1,16 @@
-defmodule Karutte.MixProject do
+defmodule KarutteSukhi.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :karutte_wt,
+      app: :karutte_sukhi,
       version: "0.0.1",
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      name: "karutte-wt",
+      name: "karutte-sukhi",
       description:
-        "A layered behaviour sketch for WebTransport on the BEAM, with verified fragments."
+        "sukhi の live タイムラインを WebTransport で配る karutte の応用（Ticket + NATS Bridge）。"
     ]
   end
 
@@ -20,16 +20,8 @@ defmodule Karutte.MixProject do
 
   defp deps do
     [
-      # L1 の本物の床（msquic NIF）。ビルドに cmake / ninja / OpenSSL のツールチェーンが要る。
-      {:quicer, "~> 0.1"},
-      # HTTP/3 と QPACK の重い所（フレーム解析・Huffman・静的表）は cowlib に任せる。
-      # karutte-wt 側は WebTransport 固有の部分（Extended CONNECT / WT framing / datagram /
-      # runner 配線）だけを書く。
-      {:cowlib, "~> 2.17"},
-      # 観測（接続/セッション/datagram drop 等のイベント）。
-      {:telemetry, "~> 1.2"},
-      # L2 の縫い目。Plug.Conn.upgrade_adapter/3（WebSock と同じ脱出口）に乗るため。
-      {:plug, "~> 1.16"},
+      # WebTransport サーバの芯。姉妹リポジトリ karutte-core（いまは隣の worktree を path で）。
+      {:karutte_wt, path: "../karutte-core"},
       # sukhi の出す event を受ける NATS クライアント（sukhi と同じ Gnat）。
       {:gnat, "~> 1.9"}
     ]

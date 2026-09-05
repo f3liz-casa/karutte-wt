@@ -1,4 +1,6 @@
-# karutte-wt を走らせる箱。quicer(msquic) をソースからビルドするので、
+# karutte-sukhi を走らせる箱。注意: karutte_wt が path 依存(../karutte-core)のあいだは
+# ビルド文脈の外なので、このままでは組めない。core を git/hex 依存にしてから。
+# quicer(msquic) をソースからビルドするので、
 # cmake / build-essential / perl(openssl) が要る。単一ステージ（origin の spike なので素直に）。
 FROM hexpm/elixir:1.17.3-erlang-27.1.2-ubuntu-jammy-20260509
 

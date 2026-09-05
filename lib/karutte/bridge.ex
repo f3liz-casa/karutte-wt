@@ -37,7 +37,7 @@ defmodule Karutte.Bridge do
            transport: conn_info.transport,
            conn: conn_info.conn,
            claims: claims,
-           gnat: Application.get_env(:karutte_wt, :gnat, :gnat),
+           gnat: Application.get_env(:karutte_sukhi, :gnat, :gnat),
            streams: %{}
          }}
 
@@ -93,7 +93,7 @@ defmodule Karutte.Bridge do
 
   defp verify(path) when is_binary(path) do
     with %{"ticket" => token} <- query(path),
-         pubkey when is_binary(pubkey) <- Application.get_env(:karutte_wt, :ticket_pubkey) do
+         pubkey when is_binary(pubkey) <- Application.get_env(:karutte_sukhi, :ticket_pubkey) do
       Ticket.verify(token, pubkey, System.system_time(:second))
     else
       nil -> {:error, :no_ticket_pubkey}

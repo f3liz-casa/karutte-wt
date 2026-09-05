@@ -24,8 +24,8 @@ bind = System.get_env("WT_BIND")
 handler =
   case System.get_env("WT_TICKET_PUBKEY") do
     k when is_binary(k) ->
-      Application.put_env(:karutte_wt, :ticket_pubkey, Base.decode64!(k))
-      Application.put_env(:karutte_wt, :gnat, :gnat)
+      Application.put_env(:karutte_sukhi, :ticket_pubkey, Base.decode64!(k))
+      Application.put_env(:karutte_sukhi, :gnat, :gnat)
       nats_host = System.get_env("NATS_HOST", "10.9.0.2")
       nats_port = String.to_integer(System.get_env("NATS_PORT", "4222"))
       # sukhi と同型の自動再接続つき接続を :gnat で。

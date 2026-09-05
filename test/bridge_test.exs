@@ -6,7 +6,7 @@ defmodule Karutte.BridgeTest do
     def open_stream(_conn, :uni), do: {:ok, make_ref()}
 
     def send(stream, iodata) do
-      if pid = Application.get_env(:karutte_wt, :test_pid),
+      if pid = Application.get_env(:karutte_sukhi, :test_pid),
         do: Kernel.send(pid, {:sent, stream, IO.iodata_to_binary(iodata)})
 
       :ok
@@ -15,12 +15,12 @@ defmodule Karutte.BridgeTest do
 
   setup do
     {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
-    Application.put_env(:karutte_wt, :ticket_pubkey, pub)
-    Application.put_env(:karutte_wt, :test_pid, self())
+    Application.put_env(:karutte_sukhi, :ticket_pubkey, pub)
+    Application.put_env(:karutte_sukhi, :test_pid, self())
 
     on_exit(fn ->
-      Application.delete_env(:karutte_wt, :ticket_pubkey)
-      Application.delete_env(:karutte_wt, :test_pid)
+      Application.delete_env(:karutte_sukhi, :ticket_pubkey)
+      Application.delete_env(:karutte_sukhi, :test_pid)
     end)
 
     %{priv: priv}
