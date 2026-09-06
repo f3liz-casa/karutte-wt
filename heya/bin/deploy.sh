@@ -29,8 +29,8 @@ ssh "$BOX" "
   docker stop karutte 2>/dev/null || true
   docker run -d --name heya --restart unless-stopped \
     --env-file ~/heya.env \
-    -v /etc/letsencrypt:/le:ro \
-    -p 443:4433/udp -p 443:4000/tcp \
+    -v /etc/letsencrypt:/le:ro -v heya-state:/heya/state \
+    -p 443:4433/udp -p 443:4000/tcp -p 127.0.0.1:7333:7333/tcp \
     heya:$TAG
   sleep 8; docker logs --tail 12 heya
 "

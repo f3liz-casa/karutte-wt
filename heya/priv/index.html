@@ -1,0 +1,62 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>heya</title>
+<meta name="description" content="heya は、声だけの小さな部屋です。Zulip の通話ボタンから開きます。">
+<style>
+  body { font: 16px/1.8 system-ui, -apple-system, "Hiragino Sans", sans-serif; max-width: 34rem; margin: 3rem auto 5rem; padding: 0 1.2rem; color: #333; background: #fff; }
+  h1 { font-weight: normal; font-size: 1.6rem; margin: 0 0 .2rem; }
+  h1 small { font-size: .9rem; color: #888; margin-left: .6rem; }
+  h2 { font-weight: normal; font-size: 1.05rem; margin: 2.4rem 0 .4rem; color: #555; border-bottom: 1px solid #eee; padding-bottom: .2rem; }
+  p, li { margin: .3rem 0; }
+  ul { padding-left: 1.2rem; }
+  form { display: flex; gap: .5rem; margin: 1rem 0; }
+  input { font: inherit; padding: .5rem .7rem; flex: 1; border: 1px solid #ccc; border-radius: 4px; }
+  button { font: inherit; padding: .5rem 1rem; border: 1px solid #999; background: #fafafa; border-radius: 4px; cursor: pointer; }
+  .quiet { color: #888; font-size: .92rem; }
+  code { background: #f4f4f4; padding: 0 .3rem; border-radius: 3px; font-size: .95em; }
+</style>
+
+<h1>heya <small>へや</small></h1>
+<p>声だけの、小さな部屋です。映像はありません。集まって、話して、出ていく。それだけのところです。</p>
+
+<form onsubmit="location.href='/'+encodeURIComponent(this.room.value.trim()); return false">
+  <input name="room" placeholder="部屋の名前(例: asobi)" required autocomplete="off">
+  <button>行く</button>
+</form>
+<p class="quiet">Zulip の通話ボタンを押すと、ここの部屋へのリンクができます。そのリンクを開けば、同じところに来ます。</p>
+
+<h2>入りかた</h2>
+<ul>
+  <li>部屋のページを開いて、名前を入れて「入る」を押します。</li>
+  <li>ブラウザがマイクの許可を訊いてくるので、許します。</li>
+  <li>だれが居るかが並びます。話している人は太字になります。</li>
+  <li>「出る」で出られます。タブを閉じても同じです。</li>
+</ul>
+
+<h2>部屋を開けるのは</h2>
+<p><a href="https://sukhi.f3liz.casa">sukhi.f3liz.casa</a> の管理者だけです。部屋のページで「ログインして開く」から sukhi にログインすると、「開く」が出ます。</p>
+<p>開いた部屋は 12 時間で自然に閉じます。閉じている部屋には、だれも入れません。開いている部屋には、リンクを知っている人なら入れます。</p>
+
+<h2>声はどこへ行くか</h2>
+<ul>
+  <li>あなたの声は、同じ部屋に居る人にだけ届きます。</li>
+  <li>このサーバは声を通り過ぎさせるだけで、混ぜも、録音も、保存もしません。部屋を出た瞬間に、何も残りません。</li>
+  <li>声は暗号化された道(HTTP/3 の WebTransport)を通ります。</li>
+  <li>ときどき、シロ(声で話すアシスタント)が同じ部屋に居ることがあります。居るときは名前の並びに「シロ」と出ます。シロが聞いたことばは、返事を作るために文字にされて、その会話のあいだだけ覚えています。</li>
+</ul>
+
+<h2>動くブラウザ</h2>
+<p>いまのブラウザなら、だいたい動きます。Chrome と Edge、Firefox、Safari(26.4 から)。iPhone も iOS 26.4 以降なら大丈夫です。声の道(WebTransport)が 2026 年の春に、どのブラウザにもそろいました。古いブラウザだと、部屋のページで「このブラウザでは声の道が開けない」と出ます。</p>
+
+<h2>困ったとき</h2>
+<ul>
+  <li><b>相手の声が聞こえない</b>: ページを一度読み直して、もう一度「入る」。音量と、出力先(ヘッドホンかスピーカーか)も見てください。</li>
+  <li><b>自分の声が届かない</b>: ブラウザのアドレスバーの鍵のところで、マイクが許可されているか。別のアプリがマイクを使っていないか。</li>
+  <li><b>自分の声が戻ってくる</b>: 相手がスピーカーで、マイクが拾っています。ヘッドホンだと静かになります。</li>
+  <li><b>「まだ開いていません」と出る</b>: 管理者がまだ開けていません。開いてもらってから、もう一度。</li>
+  <li><b>入れたのに、だれも居ない</b>: 部屋の名前がちがうかもしれません。リンクをもう一度確かめてください。</li>
+</ul>
+
+<h2>これは何でできているか</h2>
+<p class="quiet">Elixir と、<code>karutte-wt</code>(WebTransport を BEAM に住まわせたもの)の上に、部屋の分だけを足したものです。サーバは <code>f3liz.casa</code> の小さな箱で動いています。読み違えや、うまく動かないところがあれば、sukhi の <a href="https://sukhi.f3liz.casa/@nyanrus">@nyanrus</a> に教えてください。</p>

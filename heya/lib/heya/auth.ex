@@ -34,13 +34,11 @@ defmodule Heya.Auth do
 
   # --- 小さな HTTP(依存を増やさない。:httpc で足りる)
   defp post_json(url, body) do
-    :inets.start(); :ssl.start()
     req = {String.to_charlist(url), [], ~c"application/json", Jason.encode!(body)}
     :httpc.request(:post, req, [ssl: ssl(), timeout: 10_000], []) |> reply()
   end
 
   defp get_json(url, token) do
-    :inets.start(); :ssl.start()
     req = {String.to_charlist(url), [{~c"authorization", String.to_charlist("Bearer " <> token)}]}
     :httpc.request(:get, req, [ssl: ssl(), timeout: 10_000], []) |> reply()
   end

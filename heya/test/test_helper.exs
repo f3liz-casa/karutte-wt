@@ -1,1 +1,6 @@
+# 門の永続を、本物の state/gate.json から切り離す(試験が本物の門を開けたままにしないように)
+gate = Path.join(System.tmp_dir!(), "heya-gate-test.json")
+File.rm(gate)
+System.put_env("HEYA_GATE_FILE", gate)
+:ets.delete_all_objects(Heya.Gate)
 ExUnit.start()

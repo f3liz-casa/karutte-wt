@@ -15,6 +15,7 @@ ssh "$BOX" '
     echo "HEYA_WT_PORT=443"
     echo "HEYA_HTTP_PORT=4000"
     echo "HEYA_SUKHI=https://sukhi.f3liz.casa"
+    echo "HEYA_HOST=heya.f3liz.casa"
   } > ~/heya.env
   rm ~/heya.env.oauth; chmod 600 ~/heya.env
   echo "~/heya.env: $(wc -l < ~/heya.env) 行"; cut -d= -f1 ~/heya.env | tr "\n" " "; echo

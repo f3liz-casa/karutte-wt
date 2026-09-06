@@ -2,18 +2,18 @@ defmodule Heya.Room do
   @moduledoc """
   部屋ひとつ。だれが居るかと、声の配りかただけ。バイトの中身は見ない。
 
-  参加者は pid で居る。声が来たら、送った本人以外の pid に `{:heya, <<id, opus>>}` を送る。
+  参加者は pid で居る。声が来たら、送った本人以外の pid に `{:heya, <<id, pcm>>}` を送る。
   自分の声が自分に戻らないのが、この部屋のいちばん大事なところ(エコーの消し合いが要らない)。
 
   背圧: 受け手のメールボックスに声が溜まりすぎていたら(遅い回線・止まった koe)、その人の分は
-  落とす。声は best-effort で、遅れて届く一秒前の声に意味は無い。制御(join/leave)は落とさない。
+  落とす。声は best-effort で、遅れて届く一秒前の声に意味は無い。制御(join/leave/名簿)は落とさない。
   """
   use GenServer
 
   # 受け手の未処理メッセージがこれを超えたら、その人には声を送らない(50 枠 = 一秒ぶん)。
   @max_backlog 50
 
-  defstruct name: nil, members: %{}, next: 1
+  defstruct name: nil, members: %{}, next: 1, count: %{}
 
   # --- 外から
 
@@ -54,7 +54,10 @@ defmodule Heya.Room do
   def child_spec(name), do: %{id: {__MODULE__, name}, start: {__MODULE__, :start_link, [name]}, restart: :transient}
 
   @impl true
-  def init(name), do: {:ok, %__MODULE__{name: name}}
+  def init(name) do
+    Process.send_after(self(), :roster, 3_000)
+    {:ok, %__MODULE__{name: name}}
+  end
 
   @impl true
   def handle_call({:join, who, pid}, _from, s) do
@@ -71,12 +74,24 @@ defmodule Heya.Room do
   @impl true
   def handle_cast({:frame, id, pcm}, s) do
     tell(s.members, id, <<id::8, pcm::binary>>, &ready?/1)
-    {:noreply, s}
+    {:noreply, %{s | count: Map.update(s.count, id, 1, &(&1 + 1))}}
   end
 
   def handle_cast({:leave, id}, s), do: after_drop(drop(s, id))
 
+  # 名簿は datagram で運ぶので落ちることがある。数秒おきに配り直す(小さいので気にならない)
   @impl true
+  def handle_info(:roster, s) do
+    roster = for {i, m} <- s.members, do: %{id: i, name: m.name}
+    for {i, m} <- s.members, do: send(m.pid, {:heya, control(%{you: i, members: roster})})
+    Process.send_after(self(), :roster, 3_000)
+    if System.get_env("HEYA_DEBUG") == "1" and map_size(s.count) > 0 do
+      require Logger
+      Logger.info("heya/room #{s.name} 3秒で受けた枠: " <> Enum.map_join(s.count, " ", fn {i, n} -> "#{Map.get(s.members, i, %{name: "?"}).name}=#{n}" end))
+    end
+    {:noreply, %{s | count: %{}}}
+  end
+
   def handle_info({:DOWN, _ref, :process, pid, _}, s) do
     case Enum.find(s.members, fn {_, m} -> m.pid == pid end) do
       {id, _} -> after_drop(drop(s, id))

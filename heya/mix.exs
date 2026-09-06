@@ -9,7 +9,7 @@ defmodule Heya.MixProject do
   end
 
   def application do
-    [extra_applications: [:logger], mod: {Heya.Application, []}]
+    [extra_applications: [:logger, :inets, :ssl], mod: {Heya.Application, []}]
   end
 
   defp deps do
@@ -21,6 +21,7 @@ defmodule Heya.MixProject do
       # ページ(/<部屋>)を返すだけの HTTP
       {:bandit, "~> 1.6"},
       {:plug, "~> 1.16"},
+      {:websock_adapter, "~> 0.5"},
       {:jason, "~> 1.4"}
     ]
   end

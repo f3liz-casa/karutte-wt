@@ -1,8 +1,8 @@
 defmodule Heya.Tcp do
   @moduledoc """
   koe の口。QUIC を持たない子のための、素の TCP(127.0.0.1 だけ)。
-  枠は 2 バイト長さ前置き(`packet: 2`)。最初の一枠は `JOIN <部屋> <名前>`、あとは声(Opus)。
-  こちらからは `<<id, opus>>` と `<<0, json>>` を同じ枠で返す。
+  枠は 2 バイト長さ前置き(`packet: 2`)。最初の一枠は `JOIN <部屋> <名前>`、あとは声(PCM)。
+  こちらからは `<<id, pcm>>` と `<<0, json>>` を同じ枠で返す。
   """
   use GenServer
   require Logger

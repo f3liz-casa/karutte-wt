@@ -11,10 +11,27 @@ defmodule Heya.Web do
   plug :dispatch
 
   get "/" do
-    send_resp(conn, 200, "heya。/<部屋名> で開いてください。")
+    page = :heya |> :code.priv_dir() |> to_string() |> Path.join("index.html") |> File.read!()
+    conn |> put_resp_content_type("text/html") |> send_resp(200, page)
   end
 
+  # OAuth の callback は登録した名前(HEYA_HOST)でしか受けない。別の名前で来たら、その名前に送り直す
+  defp canonical(conn) do
+    case System.get_env("HEYA_HOST") do
+      nil -> conn
+      host when host == conn.host -> conn
+      host -> conn |> redirect("https://#{host}#{conn.request_path}#{qs(conn)}") |> halt()
+    end
+  end
+  defp qs(%{query_string: ""}), do: ""
+  defp qs(%{query_string: q}), do: "?" <> q
+
   get "/auth" do
+    conn = canonical(conn)
+    if conn.halted, do: conn, else: auth(conn)
+  end
+
+  defp auth(conn) do
     room = conn.params["room"] || ""
     state = Base.url_encode64(:crypto.strong_rand_bytes(8), padding: false) <> "." <> room
     conn
@@ -39,6 +56,21 @@ defmodule Heya.Web do
           {:error, :not_admin} -> send_resp(conn, 403, "admin ではないので、部屋は開けない。入るのは、開いた部屋なら誰でも。")
           {:error, e} -> send_resp(conn, 502, "sukhi と話せなかった: " <> inspect(e))
         end
+    end
+  end
+
+  # koe の口。合言葉は Authorization: Bearer か ?token=
+  get "/koe/:room" do
+    token =
+      case get_req_header(conn, "authorization") do
+        ["Bearer " <> t] -> t
+        _ -> conn.params["token"]
+      end
+    if Heya.KoeSocket.allowed?(token) do
+      who = (conn.params["name"] || "シロ") |> String.slice(0, 40)
+      WebSockAdapter.upgrade(conn, Heya.KoeSocket, %{room: room, who: who}, timeout: 3_600_000)   # 黙っている koe を切らない(koe は 30 秒ごとに ping も打つ)
+    else
+      send_resp(conn, 403, "合言葉がちがう")
     end
   end
 
