@@ -47,7 +47,7 @@ defmodule Karutte.WebTransport.StreamServer do
   """
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
-  @impl true
+  @impl GenServer
   def init(opts) do
     transport = Keyword.fetch!(opts, :transport)
     stream = Keyword.fetch!(opts, :stream)
@@ -64,7 +64,7 @@ defmodule Karutte.WebTransport.StreamServer do
     end
   end
 
-  @impl true
+  @impl GenServer
   def handle_continue(:handoff, s) do
     case Handoff.wait(s.stream) do
       {:ok, buffered} ->
@@ -92,7 +92,7 @@ defmodule Karutte.WebTransport.StreamServer do
     end
   end
 
-  @impl true
+  @impl GenServer
   def handle_info({:quic, :data, stream, bin, meta}, %{stream: stream} = s) do
     case feed(bin, meta, s, true) do
       {s, :cont} -> {:noreply, s}
@@ -116,7 +116,7 @@ defmodule Karutte.WebTransport.StreamServer do
     end
   end
 
-  @impl true
+  @impl GenServer
   def terminate(reason, s) do
     if function_exported?(s.mod, :terminate, 2), do: s.mod.terminate(reason, s.state)
     :ok

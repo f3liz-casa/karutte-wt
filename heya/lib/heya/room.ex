@@ -53,13 +53,13 @@ defmodule Heya.Room do
   def start_link(name), do: GenServer.start_link(__MODULE__, name, name: {:via, Registry, {Heya.Registry, name}})
   def child_spec(name), do: %{id: {__MODULE__, name}, start: {__MODULE__, :start_link, [name]}, restart: :transient}
 
-  @impl true
+  @impl GenServer
   def init(name) do
     Process.send_after(self(), :roster, 3_000)
     {:ok, %__MODULE__{name: name}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_call({:join, who, pid}, _from, s) do
     id = s.next
     Process.monitor(pid)
@@ -71,7 +71,7 @@ defmodule Heya.Room do
 
   def handle_call(:members, _from, s), do: {:reply, for({i, m} <- s.members, do: %{id: i, name: m.name}), s}
 
-  @impl true
+  @impl GenServer
   def handle_cast({:frame, id, pcm}, s) do
     tell(s.members, id, <<id::8, pcm::binary>>, &ready?/1)
     {:noreply, %{s | count: Map.update(s.count, id, 1, &(&1 + 1))}}
@@ -80,7 +80,7 @@ defmodule Heya.Room do
   def handle_cast({:leave, id}, s), do: after_drop(drop(s, id))
 
   # 名簿は datagram で運ぶので落ちることがある。数秒おきに配り直す(小さいので気にならない)
-  @impl true
+  @impl GenServer
   def handle_info(:roster, s) do
     roster = for {i, m} <- s.members, do: %{id: i, name: m.name}
     for {i, m} <- s.members, do: send(m.pid, {:heya, control(%{you: i, members: roster})})

@@ -31,7 +31,7 @@ defmodule Heya.Gate do
 
   def file, do: System.get_env("HEYA_GATE_FILE", @path)
 
-  @impl true
+  @impl GenServer
   def init(_) do
     :ets.new(__MODULE__, [:named_table, :public, read_concurrency: true])
     load()

@@ -46,25 +46,25 @@ defmodule Karutte.QuicTransport.Quicer do
 
   # --- Imperative face ---
 
-  @impl true
+  @impl Karutte.QuicTransport
   def open_stream(conn, dir, opts \\ []) do
     flags = if dir == :uni, do: @stream_open_flag_unidirectional, else: 0
     call(:start_stream, [conn, Keyword.put(opts, :open_flag, flags)])
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def control(stream, pid), do: call(:controlling_process, [stream, pid])
 
-  @impl true
+  @impl Karutte.QuicTransport
   def set_active(stream, active), do: call(:setopt, [stream, :active, active])
 
-  @impl true
+  @impl Karutte.QuicTransport
   def send(stream, data, opts \\ []) do
     flags = if Keyword.get(opts, :fin, false), do: @send_flag_fin, else: 0
     call(:send, [stream, data, flags])
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def shutdown(stream, :write),
     do: call(:async_shutdown_stream, [stream, @stream_shutdown_graceful, 0])
 
@@ -74,10 +74,10 @@ defmodule Karutte.QuicTransport.Quicer do
   def shutdown(stream, {:stop_sending, code}),
     do: call(:async_shutdown_stream, [stream, @stream_shutdown_abort_receive, code])
 
-  @impl true
+  @impl Karutte.QuicTransport
   def send_datagram(conn, data), do: call(:send_dgram, [conn, data])
 
-  @impl true
+  @impl Karutte.QuicTransport
   def close(conn, code) do
     call(:async_shutdown_connection, [conn, 0, code])
     :ok

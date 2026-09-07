@@ -11,7 +11,7 @@ defmodule Heya.Application do
   """
   use Application
 
-  @impl true
+  @impl Application
   def start(_type, _args) do
     # 中で聞く口。外から見える口(HEYA_WT_PORT、ページに書く)とは別。docker が 443 → 4433 に流す
     wt_port = env_int("HEYA_WT_LISTEN", 4433)

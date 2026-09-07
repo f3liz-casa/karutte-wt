@@ -23,7 +23,7 @@ defmodule Karutte.Http3.Acceptor do
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
-  @impl true
+  @impl GenServer
   def init(opts) do
     state = %{
       listener: Listener.handle(Keyword.fetch!(opts, :listener)),
@@ -37,7 +37,7 @@ defmodule Karutte.Http3.Acceptor do
     {:ok, state, {:continue, :accept}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_continue(:accept, s) do
     # Hand ownership to the Connection immediately after accept. The handshake happens on the
     # Connection side. If the acceptor did it, a client's early stream events could land in the

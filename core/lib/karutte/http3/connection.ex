@@ -70,7 +70,7 @@ defmodule Karutte.Http3.Connection do
   @doc "Graceful shutdown: send H3 GOAWAY and a DRAIN capsule to every WebTransport session."
   def drain(pid), do: GenServer.cast(pid, :drain)
 
-  @impl true
+  @impl GenServer
   def init(opts) do
     Process.flag(:trap_exit, true)
 
@@ -86,7 +86,7 @@ defmodule Karutte.Http3.Connection do
 
   # Now that we own the connection: handshake first (in our own process, so handshakes run
   # concurrently and no events are lost), then bring up H3.
-  @impl true
+  @impl GenServer
   def handle_cast(:setup, s) do
     case :quicer.handshake(s.qconn) do
       {:ok, _} -> {:noreply, do_setup(s)}
@@ -168,7 +168,7 @@ defmodule Karutte.Http3.Connection do
   # --- Events from quicer ---
 
   # quic messages that arrive before the machine is up (before setup) are held back.
-  @impl true
+  @impl GenServer
   def handle_info({:quic, _, _, _} = msg, %{machine: nil} = s),
     do: {:noreply, %{s | pending: [msg | s.pending]}}
 
@@ -291,7 +291,7 @@ defmodule Karutte.Http3.Connection do
     {:noreply, s}
   end
 
-  @impl true
+  @impl GenServer
   def terminate(_reason, %{qconn: qconn} = s) when qconn != nil do
     # Session runners go down with us through the link. Only the QUIC connection is closed explicitly.
     telem([:connection, :stop], %{sessions: map_size(s.sessions)})
@@ -301,7 +301,7 @@ defmodule Karutte.Http3.Connection do
 
   def terminate(_reason, _s), do: :ok
 
-  @impl true
+  @impl GenServer
   def handle_call({:open_stream, dir, sid, opts}, _from, s) do
     flag = if dir == :uni, do: @open_uni, else: 0
     # cowlib spells direction :unidi / :bidi (ours is :uni / :bidi).

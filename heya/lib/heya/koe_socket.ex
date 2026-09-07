@@ -6,25 +6,25 @@ defmodule Heya.KoeSocket do
   @behaviour WebSock
   require Logger
 
-  @impl true
+  @impl WebSock
   def init(%{room: room, who: who}) do
     {:ok, id, roster} = Heya.Room.join(room, who)
     Logger.info("heya: #{who} が #{room} に入った(#{id}、ws)")
     {:push, {:binary, <<0::8, Jason.encode!(%{you: id, members: roster})::binary>>}, %{room: room, id: id}}
   end
 
-  @impl true
+  @impl WebSock
   def handle_in({pcm, [opcode: :binary]}, st) do
     Heya.Room.frame(st.room, st.id, pcm)
     {:ok, st}
   end
   def handle_in(_, st), do: {:ok, st}
 
-  @impl true
+  @impl WebSock
   def handle_info({:heya, bin}, st), do: {:push, {:binary, bin}, st}
   def handle_info(_, st), do: {:ok, st}
 
-  @impl true
+  @impl WebSock
   def terminate(_reason, st), do: Heya.Room.leave(st.room, st.id)
 
   @doc "合言葉が合うか。無設定なら誰も通さない。"

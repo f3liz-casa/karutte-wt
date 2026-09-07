@@ -9,7 +9,7 @@ defmodule Heya.Tcp do
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
-  @impl true
+  @impl GenServer
   def init(opts) do
     port = Keyword.fetch!(opts, :port)
     {:ok, lsock} = :gen_tcp.listen(port, [:binary, packet: 2, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])

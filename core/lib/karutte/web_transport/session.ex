@@ -48,7 +48,7 @@ defmodule Karutte.WebTransport.Session do
   """
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
 
-  @impl true
+  @impl GenServer
   def init(opts) do
     # StreamServers are linked, but we trap exits so that one stream handler crashing does not
     # take the whole session down with it.
@@ -74,7 +74,7 @@ defmodule Karutte.WebTransport.Session do
     end
   end
 
-  @impl true
+  @impl GenServer
   def handle_info({:quic, :new_stream, _conn, stream, dir}, s) do
     {disp, state} = s.mod.handle_stream(stream, dir, s.state)
     {:noreply, dispatch(disp, stream, %{s | state: state})}
@@ -137,7 +137,7 @@ defmodule Karutte.WebTransport.Session do
     end
   end
 
-  @impl true
+  @impl GenServer
   def terminate(reason, s) do
     if function_exported?(s.mod, :terminate, 2), do: s.mod.terminate(reason, s.state)
     :ok

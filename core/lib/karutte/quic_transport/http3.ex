@@ -24,42 +24,42 @@ defmodule Karutte.QuicTransport.Http3 do
   @type conn :: {:h3c, pid(), term(), non_neg_integer()}
   @type stream :: {:h3s, pid(), term()}
 
-  @impl true
+  @impl Karutte.QuicTransport
   def open_stream({:h3c, conn_pid, _qconn, sid}, dir, opts \\ []) do
     GenServer.call(conn_pid, {:open_stream, dir, sid, opts})
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def control({:h3s, conn_pid, qs}, pid) do
     Kernel.send(conn_pid, {:set_owner, qs, pid})
     :ok
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def set_active({:h3s, conn_pid, qs}, active) do
     Kernel.send(conn_pid, {:stream_set_active, qs, active})
     :ok
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def send({:h3s, conn_pid, qs}, data, opts \\ []) do
     Kernel.send(conn_pid, {:stream_send, qs, data, Keyword.get(opts, :fin, false)})
     :ok
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def shutdown({:h3s, conn_pid, qs}, how) do
     Kernel.send(conn_pid, {:stream_shutdown, qs, how})
     :ok
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def send_datagram({:h3c, conn_pid, _qconn, sid}, data) do
     Kernel.send(conn_pid, {:datagram, sid, data})
     :ok
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def close({:h3c, conn_pid, _qconn, sid}, code) do
     Kernel.send(conn_pid, {:close_session, sid, code})
     :ok

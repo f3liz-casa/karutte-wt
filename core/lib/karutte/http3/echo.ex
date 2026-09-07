@@ -17,26 +17,26 @@ defmodule Karutte.Http3.Echo do
 
   @behaviour Karutte.WebTransport
 
-  @impl true
+  @impl Karutte.WebTransport
   def init(_arg, conn_info) do
     # conn_info carries the transport and the connection handle.
     # Both are needed to bounce datagrams.
     {:ok, %{transport: conn_info.transport, conn: conn_info.conn}}
   end
 
-  @impl true
+  @impl Karutte.WebTransport
   def handle_stream(_stream, _dir, state) do
     # Every stream gets its own long-lived echo owner.
     {{:handler, __MODULE__.Stream, nil}, state}
   end
 
-  @impl true
+  @impl Karutte.WebTransport
   def handle_datagram(bin, state) do
     state.transport.send_datagram(state.conn, bin)
     {:ok, state}
   end
 
-  @impl true
+  @impl Karutte.WebTransport
   def terminate(_reason, _state), do: :ok
 
   defmodule Stream do
@@ -44,16 +44,16 @@ defmodule Karutte.Http3.Echo do
 
     @behaviour Karutte.WebTransport.Stream
 
-    @impl true
+    @impl Karutte.WebTransport.Stream
     def init(_stream, _arg), do: {:ok, %{}, active: true}
 
-    @impl true
+    @impl Karutte.WebTransport.Stream
     def handle_in(bin, state), do: {:push, bin, state, active: true}
 
-    @impl true
+    @impl Karutte.WebTransport.Stream
     def handle_fin(state), do: {:close_write, state}
 
-    @impl true
+    @impl Karutte.WebTransport.Stream
     def terminate(_reason, _state), do: :ok
   end
 end

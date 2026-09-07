@@ -14,7 +14,7 @@ defmodule Karutte.Http3.Listener do
   @doc "Fetch the listener handle."
   def handle(name), do: GenServer.call(name, :handle)
 
-  @impl true
+  @impl GenServer
   def init(opts) do
     Process.flag(:trap_exit, true)
     port = Keyword.fetch!(opts, :port)
@@ -58,10 +58,10 @@ defmodule Karutte.Http3.Listener do
     end
   end
 
-  @impl true
+  @impl GenServer
   def handle_call(:handle, _from, s), do: {:reply, s.listener, s}
 
-  @impl true
+  @impl GenServer
   def terminate(_reason, %{listener: listener}) do
     :quicer.close_listener(listener)
     :ok

@@ -8,7 +8,7 @@ defmodule Heya.WT do
   """
   @behaviour Karutte.WebTransport
   require Logger
-  @impl true
+  @impl Karutte.WebTransport
   def authorize(%{path: path}) when is_binary(path) do
     # 門が開いているか、koe の合言葉(?token=)を持っているか
     case parse(path) do
@@ -18,14 +18,14 @@ defmodule Heya.WT do
   end
   def authorize(_), do: {:reject, 404}
 
-  @impl true
+  @impl Karutte.WebTransport
   def init(_arg, ci) do
     {:ok, room, name} = parse(ci[:path])
     {:ok, %{transport: ci.transport, conn: ci.conn, room: room, who: name, id: nil}}
   end
 
   # セッションが立ってから入る(それより前は datagram を送れない)
-  @impl true
+  @impl Karutte.WebTransport
   def handle_info(:wt_ready, s) do
     {:ok, id, roster} = Heya.Room.join(s.room, s.who)
     s.transport.send_datagram(s.conn, <<0::8, Jason.encode!(%{you: id, members: roster})::binary>>)
@@ -53,7 +53,7 @@ defmodule Heya.WT do
   end
   def handle_info(_msg, s), do: {:ok, s}
 
-  @impl true
+  @impl Karutte.WebTransport
   def handle_datagram(_pcm, %{id: nil} = s), do: {:ok, s}
   def handle_datagram(pcm, s) do
     Heya.Room.frame(s.room, s.id, pcm)
@@ -75,13 +75,13 @@ defmodule Heya.WT do
   end
 
   # 部屋ではストリームは使わない(声は全部 datagram)
-  @impl true
+  @impl Karutte.WebTransport
   def handle_stream(_stream, _dir, s), do: {{:reset, 0}, s}
 
-  @impl true
+  @impl Karutte.WebTransport
   def handle_inline_stream(_stream, _bin, s), do: {:ok, s}
 
-  @impl true
+  @impl Karutte.WebTransport
   def terminate(_reason, %{id: id, room: room}) when is_integer(id), do: Heya.Room.leave(room, id)
   def terminate(_reason, _s), do: :ok
 

@@ -20,7 +20,7 @@ defmodule Karutte.Bridge do
   require Logger
   alias Karutte.Ticket
 
-  @impl true
+  @impl Karutte.WebTransport
   def authorize(conn_info) do
     case verify(conn_info[:path]) do
       {:ok, _claims} -> :ok
@@ -28,7 +28,7 @@ defmodule Karutte.Bridge do
     end
   end
 
-  @impl true
+  @impl Karutte.WebTransport
   def init(_arg, conn_info) do
     case verify(conn_info[:path]) do
       {:ok, claims} ->
@@ -47,7 +47,7 @@ defmodule Karutte.Bridge do
   end
 
   # セッション確立後に、feed ごとに sub＋uni-stream を開く。
-  @impl true
+  @impl Karutte.WebTransport
   def handle_info(:wt_ready, state) do
     streams =
       for feed <- state.claims.feeds, subject = subject_for(feed, state.claims.sub), into: %{} do
@@ -70,10 +70,10 @@ defmodule Karutte.Bridge do
   def handle_info(_msg, state), do: {:ok, state}
 
   # client 発ストリームは受けない（server push 専用の橋）。
-  @impl true
+  @impl Karutte.WebTransport
   def handle_stream(_stream, _dir, state), do: {{:reset, 0}, state}
 
-  @impl true
+  @impl Karutte.WebTransport
   def terminate(_reason, _state), do: :ok
 
   @doc """

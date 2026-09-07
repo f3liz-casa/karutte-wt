@@ -76,7 +76,7 @@ defmodule Karutte.QuicTransport.Http2 do
 
   # --- Imperative face (emits framed events to the sink) ---
 
-  @impl true
+  @impl Karutte.QuicTransport
   def open_stream(%__MODULE__{} = conn, dir, opts \\ []) do
     # On H2, stream id allocation belongs to the H2 layer (L2). Here it is passed in.
     id = Keyword.fetch!(opts, :id)
@@ -84,7 +84,7 @@ defmodule Karutte.QuicTransport.Http2 do
     {:ok, {conn, id}}
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def control({%__MODULE__{} = conn, id}, pid) do
     # No affine NIF handle to transfer as on QUIC. On H2 routing is by stream id, so control
     # is a registration: "deliver receives for this id to pid".
@@ -92,14 +92,14 @@ defmodule Karutte.QuicTransport.Http2 do
     :ok
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def set_active({%__MODULE__{} = conn, id}, active) do
     # AXIS 2 survives as H2's per-stream WINDOW_UPDATE.
     emit(conn, {:h2_window, id, active})
     :ok
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def send({%__MODULE__{} = conn, id}, data, opts \\ []) do
     fin = Keyword.get(opts, :fin, false)
     # A DATA frame. fin is END_STREAM.
@@ -107,7 +107,7 @@ defmodule Karutte.QuicTransport.Http2 do
     :ok
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def shutdown({%__MODULE__{} = conn, id}, :write) do
     # Half-closing the write side = END_STREAM with an empty payload.
     emit(conn, {:h2_out, id, <<>>, true})
@@ -126,7 +126,7 @@ defmodule Karutte.QuicTransport.Http2 do
     :ok
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def send_datagram(%__MODULE__{} = conn, data) do
     # Datagrams become DATAGRAM capsules, delivered reliably on the CONNECT stream (emulated).
     capsule = Capsule.encode(Capsule.datagram_type(), data)
@@ -134,7 +134,7 @@ defmodule Karutte.QuicTransport.Http2 do
     :ok
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def close(%__MODULE__{} = conn, code) do
     emit(conn, {:h2_goaway, code})
     :ok
