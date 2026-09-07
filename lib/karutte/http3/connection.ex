@@ -240,10 +240,15 @@ defmodule Karutte.Http3.Connection do
     {:noreply, s}
   end
 
+  # datagram は投げっぱなし(RFC 9221)。同期の send_dgram は msquic の送り状態が返るまで
+  # 接続プロセスを止める(RTT ぶん)ので、50/s の声が 20/s に絞られて遅れて出ていった(heya で実測)。
+  # 送り状態の通知は下の handle_info で捨てる。
   def handle_info({:datagram, sid, data}, s) do
-    :quicer.send_dgram(s.qconn, :erlang.iolist_to_binary(:cow_http3.datagram(sid, data)))
+    :quicer.async_send_dgram(s.qconn, :erlang.iolist_to_binary(:cow_http3.datagram(sid, data)))
     {:noreply, s}
   end
+
+  def handle_info({:quic, :dgram_send_state, _c, _}, s), do: {:noreply, s}
 
   # 床の close/2 ＝ その WT セッションだけ閉じる（QUIC 接続は他セッションのため生かす）。
   def handle_info({:close_session, sid, code}, s) do
