@@ -22,7 +22,7 @@ defmodule Karutte.Http3.Acceptor do
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
-  @impl true
+  @impl GenServer
   def init(opts) do
     state = %{
       listener: Listener.handle(Keyword.fetch!(opts, :listener)),
@@ -36,7 +36,7 @@ defmodule Karutte.Http3.Acceptor do
     {:ok, state, {:continue, :accept}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_continue(:accept, s) do
     # accept したら即 Connection へ所有権を渡す。handshake は Connection 側でやる
     # （acceptor が抱えると、handshake 直後〜引き渡しの隙にクライアントの早いストリーム

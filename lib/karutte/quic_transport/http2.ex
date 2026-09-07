@@ -75,7 +75,7 @@ defmodule Karutte.QuicTransport.Http2 do
 
   # --- 命令の面（sink へ framed イベントを出す） ---
 
-  @impl true
+  @impl Karutte.QuicTransport
   def open_stream(%__MODULE__{} = conn, dir, opts \\ []) do
     # H2 ではストリーム id の採番は H2 層（L2）の仕事。ここでは渡してもらう。
     id = Keyword.fetch!(opts, :id)
@@ -83,7 +83,7 @@ defmodule Karutte.QuicTransport.Http2 do
     {:ok, {conn, id}}
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def control({%__MODULE__{} = conn, id}, pid) do
     # QUIC のような affine な NIF ハンドルの移譲は無い。H2 ではストリーム id で
     # 経路を引くだけなので、control は「この id の受信を pid へ流す」登録になる。
@@ -91,14 +91,14 @@ defmodule Karutte.QuicTransport.Http2 do
     :ok
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def set_active({%__MODULE__{} = conn, id}, active) do
     # AXIS 2 は H2 のストリーム別 WINDOW_UPDATE として survive する。
     emit(conn, {:h2_window, id, active})
     :ok
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def send({%__MODULE__{} = conn, id}, data, opts \\ []) do
     fin = Keyword.get(opts, :fin, false)
     # DATA フレーム。fin は END_STREAM。
@@ -106,7 +106,7 @@ defmodule Karutte.QuicTransport.Http2 do
     :ok
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def shutdown({%__MODULE__{} = conn, id}, :write) do
     # 書き側半閉じ = 空ペイロードの END_STREAM。
     emit(conn, {:h2_out, id, <<>>, true})
@@ -125,7 +125,7 @@ defmodule Karutte.QuicTransport.Http2 do
     :ok
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def send_datagram(%__MODULE__{} = conn, data) do
     # datagram は DATAGRAM カプセルにして CONNECT ストリーム上を信頼配送（擬似化）。
     capsule = Capsule.encode(Capsule.datagram_type(), data)
@@ -133,7 +133,7 @@ defmodule Karutte.QuicTransport.Http2 do
     :ok
   end
 
-  @impl true
+  @impl Karutte.QuicTransport
   def close(%__MODULE__{} = conn, code) do
     emit(conn, {:h2_goaway, code})
     :ok

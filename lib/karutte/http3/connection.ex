@@ -68,7 +68,7 @@ defmodule Karutte.Http3.Connection do
   @doc "graceful shutdown: H3 GOAWAY を送り、各 WT セッションに DRAIN capsule を配る。"
   def drain(pid), do: GenServer.cast(pid, :drain)
 
-  @impl true
+  @impl GenServer
   def init(opts) do
     Process.flag(:trap_exit, true)
 
@@ -84,7 +84,7 @@ defmodule Karutte.Http3.Connection do
 
   # 所有を得たので、まず handshake（自分のプロセスで＝並行かつイベント取りこぼしなし）、
   # 続けて H3 を立ち上げる。
-  @impl true
+  @impl GenServer
   def handle_cast(:setup, s) do
     case :quicer.handshake(s.qconn) do
       {:ok, _} -> {:noreply, do_setup(s)}
@@ -165,7 +165,7 @@ defmodule Karutte.Http3.Connection do
   # --- quicer からのイベント ---
 
   # machine が立つ前（setup 前）に来た quic メッセージは貯めておく（フラッシュ分）。
-  @impl true
+  @impl GenServer
   def handle_info({:quic, _, _, _} = msg, %{machine: nil} = s),
     do: {:noreply, %{s | pending: [msg | s.pending]}}
 
@@ -281,7 +281,7 @@ defmodule Karutte.Http3.Connection do
     {:noreply, s}
   end
 
-  @impl true
+  @impl GenServer
   def terminate(_reason, %{qconn: qconn} = s) when qconn != nil do
     # セッション runner は link で連れて落ちる。QUIC 接続だけ明示的に閉じる。
     telem([:connection, :stop], %{sessions: map_size(s.sessions)})
@@ -291,7 +291,7 @@ defmodule Karutte.Http3.Connection do
 
   def terminate(_reason, _s), do: :ok
 
-  @impl true
+  @impl GenServer
   def handle_call({:open_stream, dir, sid, opts}, _from, s) do
     flag = if dir == :uni, do: @open_uni, else: 0
     # cowlib は方向を :unidi / :bidi で表す（こちらの :uni / :bidi と綴りが違う）。

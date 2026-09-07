@@ -83,7 +83,7 @@ defmodule Karutte.Http3.Server do
     Supervisor.stop(name)
   end
 
-  @impl true
+  @impl Supervisor
   def init(opts) do
     name = Keyword.get(opts, :name, __MODULE__)
     listener_name = Module.concat(name, "Listener")
