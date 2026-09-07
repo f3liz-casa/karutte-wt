@@ -18,10 +18,13 @@ rsync -az --delete "$KARUTTE/lib" "$KARUTTE/mix.exs" "$KARUTTE/mix.lock" "$BOX:~
 rsync -az --delete "$SUKHI/lib" "$SUKHI/mix.exs" "$SUKHI/mix.lock" "$BOX:~/heya-build/sukhi/"
 
 echo "== 焼く"
-ssh "$BOX" "cd ~/heya-build && docker build -f heya/Dockerfile -t heya:$TAG . 2>&1 | tee ~/heya-build.log | grep -E 'Compiling|Generated|ERROR|error' | tail -20"
+# 焼けなければここで止まる(パイプで失敗を隠さない。前に一度、焼けていないのに古い箱を消してしまった)
+ssh "$BOX" "cd ~/heya-build && docker build -f heya/Dockerfile -t heya:$TAG . > ~/heya-build.log 2>&1; rc=\$?; grep -E 'Compiling|Generated|ERROR|error' ~/heya-build.log | tail -20; exit \$rc" \
+  || { echo "焼けなかった。~/heya-build.log を見る。いまの箱はそのまま。"; exit 1; }
 if ssh "$BOX" "grep -q 'Compiling quicer' ~/heya-build.log"; then
   echo "quicer を焼き直そうとしている。deps の版がずれている。止める。"; exit 1
 fi
+ssh "$BOX" "docker image inspect heya:$TAG >/dev/null" || { echo "イメージが無い。止める。"; exit 1; }
 
 echo "== 上げる"
 ssh "$BOX" "

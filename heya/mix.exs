@@ -15,7 +15,8 @@ defmodule Heya.MixProject do
   defp deps do
     [
       # 部屋の床。WebTransport over HTTP/3 は karutte-core が全部持っている(モノレポの隣)
-      {:karutte_wt, path: System.get_env("KARUTTE_PATH", "../core")},
+      # override: sukhi も同じ karutte_wt を(別の相対 path で)指すので、heya の指定を勝たせる
+      {:karutte_wt, path: System.get_env("KARUTTE_PATH", "../core"), override: true},
       # sukhi の橋(Karutte.Bridge / Ticket)。gnat もここから来る
       {:karutte_sukhi, path: System.get_env("KARUTTE_SUKHI_PATH", "../sukhi")},
       # ページ(/<部屋>)を返すだけの HTTP
